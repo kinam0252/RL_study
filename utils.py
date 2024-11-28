@@ -132,55 +132,60 @@ def apply_blur(image, focal_length, gt_focal_length):
         image_blurred = cv2.GaussianBlur(np.array(image_pil), (0, 0), blur_amount)
         return transforms.ToTensor()(image_blurred)
 
-# def calculate_reward(prev_focal_length, curr_focal_length, gt_focal_length, prev_action, action):
-#     prev_distance = abs(prev_focal_length - gt_focal_length)
-#     curr_distance = abs(curr_focal_length - gt_focal_length)
+def get_blur(focal_length, gt_focal_length):
+    blur_amount = abs(focal_length - gt_focal_length)
+    return blur_amount
 
-#     # 이전 거리가 0일 때, 현재 거리의 변화에 따른 보상
-#     if prev_distance == 0:
-#         if curr_distance == 0:
-#             return 10  # 목표를 유지했을 때 양수 보상
-#         else:
-#             return -10  # 목표에서 벗어난 경우 음수 보상
-
-#     # 이전보다 개선된 경우 1, 그렇지 않으면 -1 보상
-#     if curr_distance < prev_distance:
-#         if curr_distance == 0:
-#             return 10
-#         else:
-#             return 2  # 개선된 경우
-#     else:
-#         return -2  # 이전보다 멀어졌거나 개선되지 않은 경우
 def calculate_reward(prev_focal_length, curr_focal_length, gt_focal_length, prev_action, action):
     prev_distance = abs(prev_focal_length - gt_focal_length)
     curr_distance = abs(curr_focal_length - gt_focal_length)
 
-    # 1. 목표 유지 보상
-    if prev_distance == 0 and curr_distance == 0:
-        return 5  # 유지했지만 추가 보상 제한
+    # 이전 거리가 0일 때, 현재 거리의 변화에 따른 보상
+    if prev_distance == 0:
+        if curr_distance == 0:
+            return 10  # 목표를 유지했을 때 양수 보상
+        else:
+            return -10  # 목표에서 벗어난 경우 음수 보상
 
-    # 2. 목표에 가까워진 경우
+    # 이전보다 개선된 경우 1, 그렇지 않으면 -1 보상
     if curr_distance < prev_distance:
         if curr_distance == 0:
             return 10
-        elif action != prev_action:  # 행동 변화로 개선된 경우
-            return 3
         else:
-            return 2  # 단순 개선
+            return 2  # 개선된 경우
+    else:
+        return -2  # 이전보다 멀어졌거나 개선되지 않은 경우
+    
+# def calculate_reward(prev_focal_length, curr_focal_length, gt_focal_length, prev_action, action):
+#     prev_distance = abs(prev_focal_length - gt_focal_length)
+#     curr_distance = abs(curr_focal_length - gt_focal_length)
 
-    # 3. 변화 없음
-    if curr_distance == prev_distance:
-        return 0  # 변화 없음
+#     # 1. 목표 유지 보상
+#     if prev_distance == 0 and curr_distance == 0:
+#         return 5  # 유지했지만 추가 보상 제한
 
-    # 4. 목표에서 멀어진 경우
-    if curr_distance > prev_distance:
-        return -2
+#     # 2. 목표에 가까워진 경우
+#     if curr_distance < prev_distance:
+#         if curr_distance == 0:
+#             return 10
+#         elif action != prev_action:  # 행동 변화로 개선된 경우
+#             return 3
+#         else:
+#             return 2  # 단순 개선
 
-    # 5. 비합리적 큰 행동 변화에 대한 페널티
-    if abs(action - prev_action) > 1:
-        return -5  # 큰 변화 페널티
+#     # 3. 변화 없음
+#     if curr_distance == prev_distance:
+#         return 0  # 변화 없음
 
-    return -10  # 기타 예상치 못한 상황
+#     # 4. 목표에서 멀어진 경우
+#     if curr_distance > prev_distance:
+#         return -2
+
+#     # 5. 비합리적 큰 행동 변화에 대한 페널티
+#     if abs(action - prev_action) > 1:
+#         return -5  # 큰 변화 페널티
+
+#     return -10  # 기타 예상치 못한 상황
 
 
 

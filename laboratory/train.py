@@ -1,285 +1,173 @@
-import os
-import random
 import torch
-import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
-from torch.optim.lr_scheduler import StepLR
+import torch.nn.functional as F
+import random
+from utils import load_images, apply_blur, calculate_reward, ReplayBuffer, save_checkpoint, compute_loss, get_blur
+from model import RLModel
+from datetime import datetime, timezone, timedelta
+import os
 import numpy as np
+from torchvision.utils import save_image
+import shutil
 
-# 1. Hyperparameters and settings
-image_batch_size = 32  # 예시 배치 사이즈
-learning_rate = 1e-3
-num_epochs = 100000
-checkpoint_dir = 'laboratory/checkpoint'
-os.makedirs(checkpoint_dir, exist_ok=True)
+DEBUG = False
 
-DEBUG = True
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def train_step(model, env, optimizer, replay_buffer, replay_batch_size, gamma, debug_mode=False):
-    """
-    Perform one training step: sample a batch from the replay buffer,
-    compute Q-values, compute loss, and update the model.
+def get_checkpoint_folder(checkpoint_dir="laboratory/checkpoints"):
+    kst = datetime.now(timezone(timedelta(hours=9)))
+    timestamp = kst.strftime('%Y-%m-%d_%H-%M')
+    save_path = os.path.join(checkpoint_dir, timestamp)
+    os.makedirs(save_path, exist_ok=True)
+    return save_path
 
-    Parameters:
-    - model (torch.nn.Module): The neural network model.
-    - env (Environment): The environment for focal length adjustment.
-    - optimizer (torch.optim.Optimizer): Optimizer for model parameters.
-    - replay_buffer (ReplayBuffer): The replay buffer to sample from.
-    - replay_batch_size (int): Batch size for training.
-    - gamma (float): Discount factor for future rewards.
-    - debug_mode (bool): Whether to print debug information.
+def initialize_from_pretrained(model, checkpoint_path, device):
+    pretrained_weights = torch.load(checkpoint_path, map_location=device)
+    model_dict = model.state_dict()
+    pretrained_dict = {k: v for k, v in pretrained_weights.items() if k in model_dict}
+    model_dict.update(pretrained_dict)
+    model.load_state_dict(model_dict)
+    print(f"Model initialized from pretrained weights at {checkpoint_path}")
 
-    Returns:
-    - loss (torch.Tensor): The computed loss for this step.
-    """
-    if len(replay_buffer) < replay_batch_size:
-        return None
+def save_images_to_folder(images, folder_path="data/custom"):
+    if os.path.exists(folder_path):
+        shutil.rmtree(folder_path)
+    os.makedirs(folder_path, exist_ok=True)
 
-    # 1. Replay Buffer에서 배치 샘플링
-    batch = replay_buffer.sample(replay_batch_size)
-    prev_focal_lengths_batch, curr_focal_lengths_batch, prev_actions_batch, chosen_actions_batch = zip(*batch)
+    for idx, image in enumerate(images):
+        image_path = os.path.join(folder_path, f"image_{idx}.png")
+        save_image(image, image_path)
+        print(f"Saved {image_path}")
 
-    # 2. Q-value 예측을 위한 입력 데이터 준비
-    prev_blur_batch = [env.get_blur_amount(prev_focal_lengths_batch[i], env.gt_focal_lengths[i]) for i in range(replay_batch_size)]
-    curr_blur_batch = [env.get_blur_amount(curr_focal_lengths_batch[i], env.gt_focal_lengths[i]) for i in range(replay_batch_size)]
+def train_dqn(num_episodes=100000, image_batch_size=10, replay_batch_size=256, gamma=0.99, epsilon_start=0.7, 
+              epsilon_end=0.01, epsilon_decay=0.99, checkpoint_interval=100, mode='defocus'):
+
+    dataset = load_images(mode=mode, image_size=(256, 256), max_images=1)
+    if not dataset:
+        print("No images found. Exiting...")
+        return
+
+    replay_buffer = ReplayBuffer(10000)
+    pretrained_checkpoint = "blur_pretrain/checkpoints/best_model_checkpoint.pth"
     
-    input_data_batch = torch.tensor(
-        np.array([[prev_blur_batch[i], curr_blur_batch[i], prev_actions_batch[i]] for i in range(replay_batch_size)], dtype=np.float32),
-        dtype=torch.float32
-    )
-
-    # 3. 모델을 통한 Q-value 예측
-    q_values = model(input_data_batch)
-
-    # 4. 최대 Q-value 계산 (다음 상태에서 가장 높은 Q-value)
-    next_q_values = []
-    for i in range(replay_batch_size):
-        next_q_values.append(torch.max(q_values[i]))  # Q-value에서 최대값을 선택
-    next_q_values = torch.tensor(next_q_values, dtype=torch.float32)
-
-    # 5. 타겟 Q-value 계산 (보상 + 할인된 미래 보상)
-    rewards = [env.get_reward(chosen_actions_batch[i]) for i in range(replay_batch_size)]  # 현재 보상 계산
-    target_q_values = torch.tensor(rewards, dtype=torch.float32) + gamma * next_q_values
-
-    # 6. 손실 계산
-    action_indices = torch.tensor(chosen_actions_batch, dtype=torch.long)
-    predicted_q_values_for_actions = q_values.gather(1, action_indices.view(-1, 1))  # 선택된 액션의 Q-value
-    loss = F.mse_loss(predicted_q_values_for_actions.view(-1), target_q_values)
-
-    # 7. Backpropagation
-    optimizer.zero_grad()  # 기울기 초기화
-    loss.backward()  # 기울기 계산
-    optimizer.step()  # 모델 파라미터 업데이트
-
-    return loss
-
-class ReplayBuffer:
-    def __init__(self, capacity):
-        self.capacity = capacity
-        self.buffer = []
+    model_mode = "simple"
     
-    def push(self, experience):
-        # Add experience to buffer
-        if len(self.buffer) >= self.capacity:
-            self.buffer.pop(0)  # Remove the oldest experience if buffer is full
-        self.buffer.append(experience)
+    if model_mode == "resnet":  
+        model = ResNetDQN(input_image_channels=1, action_size=3).to(device)
+        target_model = ResNetDQN(input_image_channels=1, action_size=3).to(device)
+        initialize_from_pretrained(model, pretrained_checkpoint, device)
+        initialize_from_pretrained(target_model, pretrained_checkpoint, device)
+        target_model.load_state_dict(model.state_dict())
+    elif model_mode == "complex":
+        model = ComplexDQN(input_image_channels=2, action_size=3).to(device)
+        target_model = ComplexDQN(input_image_channels=2, action_size=3).to(device)
+        initialize_from_pretrained(model, pretrained_checkpoint, device)
+        model.freeze_shared_layers()
+        target_model.load_state_dict(model.state_dict())
+    elif model_mode == "simple":
+        model = RLModel().to(device)
+        target_model = RLModel().to(device)
+        # initialize_from_pretrained(model, pretrained_checkpoint, device)
+        target_model.load_state_dict(model.state_dict())
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    epsilon = epsilon_start
+
+    checkpoint_folder = get_checkpoint_folder()
     
-    def sample(self, batch_size):
-        # Sample a batch from the buffer
-        indices = random.sample(range(len(self.buffer)), batch_size)
-        return [self.buffer[idx] for idx in indices]
+    # save_images_to_folder(dataset, folder_path=f"{checkpoint_folder}/images")
     
-    def size(self):
-        return len(self.buffer)
-    
-replay_buffer = ReplayBuffer(capacity=10000)
+    for episode in range(num_episodes):
+        # batch_indices = random.sample(range(len(dataset)), image_batch_size)
+        gt_focal_lengths = [random.randint(5, 25) for _ in range(image_batch_size)]
+        # images = [dataset[idx][0] for idx in batch_indices]
 
-# 2. RL 환경: focal length와 blur amount로 학습
-class FocalLengthEnv:
-    def __init__(self, image_batch_size):
-        self.image_batch_size = image_batch_size
-        self.gt_focal_lengths = [random.randint(5, 25) for _ in range(image_batch_size)]  # 실제 focal length
+        focal_lengths = [max(0, min(30, gt_focal_lengths[i] + random.randint(-5, 5))) for i in range(image_batch_size)]
+        next_focal_lengths = [max(0, min(30, focal_lengths[i] + random.choice([-1, 1, 0]))) for i in range(image_batch_size)]
 
-    def get_blur_amount(self, focal_length, gt_focal_length):
-        return abs(focal_length - gt_focal_length)  # blur amount = focal length 차이
+        gt_maintain_counts = [0 for _ in range(image_batch_size)]
 
-    def reset(self):
-        self.prev_focal_lengths = [max(0, min(30, self.gt_focal_lengths[i] + random.randint(-5, 5))) for i in range(self.image_batch_size)]
-        self.prev_actions = [random.choice([0, 1, -1]) for _ in range(self.image_batch_size)]
-        self.curr_focal_lengths = [max(0, min(30, self.prev_focal_lengths[i] + self.prev_actions[i])) for i in range(self.image_batch_size)]
-        return self.prev_focal_lengths, self.prev_actions, self.curr_focal_lengths
+        # image_0s = [apply_blur(images[i], focal_lengths[i], gt_focal_lengths[i]).to(device) for i in range(image_batch_size)]
+        # image_1s = [apply_blur(images[i], next_focal_lengths[i], gt_focal_lengths[i]).to(device) for i in range(image_batch_size)]
 
-    def step(self, actions):
-        # 새로운 focal length를 actions에 따라 업데이트
-        self.next_focal_lengths = [
-            max(0, min(30, self.curr_focal_lengths[i] + (1 if actions[i] == 1 else -1 if actions[i] == 0 else 0)))
-            for i in range(self.image_batch_size)
-        ]
+        # image_0s = [img if img.dim() == 3 else img.unsqueeze(0) for img in image_0s]
+        # image_1s = [img if img.dim() == 3 else img.unsqueeze(0) for img in image_1s]
+        blur_0s = torch.abs(torch.tensor(focal_lengths) - torch.tensor(gt_focal_lengths))
+        blur_1s = torch.abs(torch.tensor(next_focal_lengths) - torch.tensor(gt_focal_lengths))
+
+        # Ensure the shape is (image_batch_size,)
+        blur_0s = blur_0s.squeeze().to(device)  # This will ensure it's of shape (image_batch_size,)
+        blur_1s = blur_1s.squeeze().to(device)
+
+        states = torch.stack([blur_0s, blur_1s], dim=1)
+        prev_actions = [F.one_hot(torch.tensor(random.randint(0, 2)), num_classes=3).float().to(device) for _ in range(image_batch_size)]
+        prev_actions = torch.stack(prev_actions)  # Shape: [Batch, 3]
+        total_rewards = [0 for _ in range(image_batch_size)]
         
-        # 현재 blur 값 계산
-        next_blur = [self.get_blur_amount(self.next_focal_lengths[i], self.gt_focal_lengths[i]) for i in range(self.image_batch_size)]
-
-        # 보상 계산
-        rewards = []
-        for i in range(self.image_batch_size):
-            # 현재 focal length가 gt focal length와 일치하면 다음 focal length가 그대로 유지되는 경우에 보상
-            if self.next_focal_lengths[i] == self.gt_focal_lengths[i]:
-                reward = 1  # 이미 gt focal length에 맞춰졌으면 양수 보상
-            else:
-                # 현재 focal length와 gt focal length 간의 차이
-                current_diff = abs(self.curr_focal_lengths[i] - self.gt_focal_lengths[i])
-                
-                # 다음 focal length로 변경된 후 차이를 계산
-                next_diff = abs(self.next_focal_lengths[i] - self.gt_focal_lengths[i])
-
-                # 만약 next focal length가 더 가까워졌다면 보상 +1, 멀어졌다면 보상 -1
-                if next_diff < current_diff:
-                    reward = 1
-                elif next_diff > current_diff:
-                    reward = -1
-                else:
-                    reward = -1  # 차이가 그대로라면 0 보상
-
-            rewards.append(reward)
-        self.prev_focal_lengths = self.curr_focal_lengths
-        self.curr_focal_lengths = self.next_focal_lengths
-        self.prev_actions = actions
-        return self.next_focal_lengths, rewards
-    
-    def get_prev_blur(self):
-        return [self.get_blur_amount(self.prev_focal_lengths[i], self.gt_focal_lengths[i]) for i in range(self.image_batch_size)]
-    
-    def get_curr_blur(self):
-        return [self.get_blur_amount(self.curr_focal_lengths[i], self.gt_focal_lengths[i]) for i in range(self.image_batch_size)]
-
-# 3. RL 모델: 이전 blur, 현재 blur, action을 받아서 새로운 action을 예측
-class RLModel(nn.Module):
-    def __init__(self):
-        super(RLModel, self).__init__()
-        
-        # 각 입력을 고차원으로 변환
-        self.fc_input = nn.Linear(2, 64)
-        
-        # 결합된 차원을 처리하기 위한 중간 레이어들 (fc 레이어 개수를 절반으로 줄임)
-        self.fc1 = nn.Linear(64, 64)  # 192 -> 256 (64*3 차원으로 수정)
-        self.fc2 = nn.Linear(64, 64)  # 256 -> 512
-        
-        # 최종 출력: 3개의 action logits (각각 -1, 0, 1)
-        self.fc_out = nn.Linear(64, 3)
-    
-    def forward(self, x):
-        x1 = x[:, 0]
-        x2 = x[:, 1]
-        x3 = x[:, 2]
-        x_diff = x2 - x1  # 이전 blur와 현재 blur의 차이
-        x_diff = x_diff.unsqueeze(1)  # 차원 추가
-        x3 = x3.unsqueeze(1)  # 차원 추가
-        if DEBUG:
-            print(f"[DEBUG] x_diff: {x_diff[0]} x3: {x3[0]}")
-        x = torch.cat([x_diff, x3], dim=-1)  # 이전 blur, 현재 blur, action, blur 차이를 결합
-        x = torch.relu(self.fc_input(x))
-
-        # 결합된 입력을 중간 레이어에 통과시킴
-        x = torch.relu(self.fc1(x))
-        x = torch.relu(self.fc2(x))
-        
-        # 최종 출력: 3개의 action logits
-        x = self.fc_out(x)
-        
-        return x
-
-# 4. Training function
-def train(model, env, optimizer, scheduler, epsilon_start=0.7, epsilon_end=0.01, epsilon_decay=0.9, debug_mode=False):
-    model.train()
-    epoch_rewards = []
-    epsilon = epsilon_start  # 초기 epsilon 값 설정
-
-    for epoch in range(num_epochs):
-        # 각 에폭마다 환경 초기화 (focal_lengths, gt_focal_lengths 등 초기화)
-        prev_focal_lengths, prev_actions, curr_focal_lengths = env.reset()
-        total_reward = 0
-
-        for step in range(10):  # 각 에폭에서 10번의 step을 진행
-            # prev_blur, curr_blur, actions를 결합하여 input_data 생성
-            prev_blur = env.get_prev_blur()
-            curr_blur = env.get_curr_blur()
-            input_data = np.array([[prev_blur[i], curr_blur[i], prev_actions[i]] for i in range(image_batch_size)], dtype=np.float32)
-
-            # torch tensor로 변환
-            input_data = torch.tensor(input_data, dtype=torch.float32)
-
-            # 랜덤 액션 또는 모델의 액션 선택
+        for step in range(10):
+            actions = []
             if random.random() < epsilon:
-                # 랜덤 액션 선택
                 actions = [random.randint(0, 2) for _ in range(image_batch_size)]
-                chosen_actions = actions  # 랜덤 선택한 actions을 chosen_actions에 할당
-                if debug_mode:
-                    print(f"[DEBUG] Random actions taken. actions: {actions[0]}")
+                if DEBUG:
+                    print(f"[DEBUG] Random actions taken. actions: {actions}")
             else:
-                # 모델을 통한 액션 선택
-                logits = model(input_data)
-                prob_actions = torch.softmax(logits, dim=-1)
-                chosen_actions = torch.argmax(prob_actions, dim=-1).numpy()  # 모델이 선택한 액션
-                if debug_mode:
-                    print(f"[DEBUG] Model actions taken. actions: {chosen_actions[0]}")
+                states = states.to(device)
+                prev_actions = prev_actions.to(device)
+                q_values = model(states, prev_actions)  # Shape: [Batch, Action_Size]
+                actions = q_values.argmax(dim=1).tolist()
+                if DEBUG:
+                    print(f"[DEBUG] Model actions taken. actions: {actions}")
 
-            experience = (prev_focal_lengths, curr_focal_lengths, prev_actions, chosen_actions)
-            replay_buffer.push(experience)
-
-            # 환경에서 현재 focal length와 보상 계산
-            _, rewards = env.step(chosen_actions)
-            total_reward += sum(rewards)
-
-            # 디버그 모드에서 첫 번째 배치 요소에 대한 자세한 정보 출력
+            new_focal_lengths = [
+                max(0, min(30, next_focal_lengths[i] + (1 if actions[i] == 1 else -1 if actions[i] == 0 else 0)))
+                for i in range(image_batch_size)
+            ]
+            
+            new_blurs = torch.abs(torch.tensor(new_focal_lengths) - torch.tensor(gt_focal_lengths)).to(device)
+    
+            rewards = [
+                calculate_reward(next_focal_lengths[i], new_focal_lengths[i], gt_focal_lengths[i],
+                                 prev_actions[i].argmax().item(), actions[i])
+                for i in range(image_batch_size)
+            ]
             if DEBUG:
-                # 첫 번째 배치 요소에 대해서만 출력
-                i = 0  # 첫 번째 배치 요소 인덱스
-                # action에 해당하는 명칭을 선택
-                action_names = {0: "backward", 2: "stay", 1: "forward"}
-                action_name = action_names[chosen_actions[i]]  # 액션의 숫자에 해당하는 명칭 선택
+                print(f"[DEBUG] rewards: {rewards}")
+            total_rewards = [total_rewards[i] + rewards[i] for i in range(image_batch_size)]
 
-                print(f"[DEBUG] Epoch {epoch+1}/{num_epochs}, Step {step+1}/10")
-                print(f"[DEBUG] focal_length (before): {env.prev_focal_lengths[i]}")
-                print(f"[DEBUG] action: {action_name} (chosen action: {chosen_actions[i]})")
-                print(f"[DEBUG] focal_length (after): {env.curr_focal_lengths[i]}")
-                print(f"[DEBUG] GT focal_length: {env.gt_focal_lengths[i]}")
-                print(f"[DEBUG] reward: {rewards[i]}")
-                print(f"[DEBUG] loss: {loss.item()}")
-                print("-----------------------------------------------------")
+            next_states = torch.stack([blur_1s, new_blurs], dim=1).to(device)
+            
+            next_prev_actions = [F.one_hot(torch.tensor(actions[i]), num_classes=3).float().to(device) for i in range(image_batch_size)]
+            next_prev_actions = torch.stack(next_prev_actions)  # Shape: [Batch, 3]
 
-        epoch_rewards.append(total_reward)
-        print(f'Epoch {epoch+1}/{num_epochs}, Reward: {total_reward}')
+            for i in range(image_batch_size):
+                if new_focal_lengths[i] == gt_focal_lengths[i]:
+                    gt_maintain_counts[i] += 1
+                else:
+                    gt_maintain_counts[i] = 0
 
-        # epsilon 값 감소 (점진적으로 epsilon 값을 줄임)
+                replay_buffer.push(states[i], prev_actions[i], actions[i], rewards[i], next_states[i], next_prev_actions[i], False)
+
+            if len(replay_buffer) >= replay_batch_size:
+                # print(f"Training model with replay buffer of size {len(replay_buffer)}")
+                batch = replay_buffer.sample(replay_batch_size)
+                loss = compute_loss(batch, model, target_model, gamma, optimizer, device)
+
+            if all(count >= 3 for count in gt_maintain_counts):
+                break
+
+            states, prev_actions, blur_1s, next_focal_lengths = next_states, next_prev_actions, new_blurs, new_focal_lengths
+        if DEBUG:
+            assert 0, "Debugging mode is on. Exiting after one episode."
+        print(f"Episode {episode + 1}/{num_episodes} - Average Total Reward: {sum(total_rewards) / image_batch_size}")
+
+        if episode % 10 == 0:
+            target_model.load_state_dict(model.state_dict())
+
+        if episode % checkpoint_interval == 0:
+            save_checkpoint(model, optimizer, episode, checkpoint_folder)
+
         epsilon = max(epsilon_end, epsilon * epsilon_decay)
 
-        loss = train_step(model, env, optimizer, replay_buffer, replay_batch_size, gamma, debug_mode)
+    save_checkpoint(model, optimizer, episode, checkpoint_folder)
+    print("Training completed.")
 
-        if loss is not None:
-            # Scheduler step
-            scheduler.step()
-
-        # 일정 에폭마다 체크포인트 저장
-        if (epoch + 1) % 10 == 0:
-            torch.save(model.state_dict(), os.path.join(checkpoint_dir, 'checkpoint.pth'))
-            print(f"Checkpoint saved at epoch {epoch+1}")
-
-        if DEBUG:
-            assert False, "Stop here"  # 디버그 모드에서 멈춤
-
-
-# 5. Optimizer 및 Scheduler 설정
-model = RLModel()
-optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-scheduler = StepLR(optimizer, step_size=30, gamma=0.5)
-
-# 6. Checkpoint 로드
-checkpoint_path = os.path.join(checkpoint_dir, 'checkpoint.pth')
-if os.path.exists(checkpoint_path):
-    model.load_state_dict(torch.load(checkpoint_path))
-    print("Loaded checkpoint from previous training")
-
-# 7. RL 환경과 학습 진행
-env = FocalLengthEnv(image_batch_size)
-train(model, env, optimizer, scheduler)
+train_dqn()

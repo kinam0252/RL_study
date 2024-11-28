@@ -220,3 +220,39 @@ class ComplexDQN(nn.Module):
 
         else:
             raise ValueError(f"Invalid mode: {mode}. Choose 'Q' or 'blur'.")
+
+class RLModel(nn.Module):
+    def __init__(self):
+        super(RLModel, self).__init__()
+
+        # 1 (차이) + 3 (action) -> 4 input features
+        self.fc_input = nn.Linear(4, 64)
+
+        # 중간 레이어들
+        self.fc1 = nn.Linear(64, 64)
+        self.fc2 = nn.Linear(64, 64)
+
+        # 최종 출력: 3개의 Q-values (각각의 action에 대한 Q-value)
+        self.fc_out = nn.Linear(64, 3)
+
+    def forward(self, states, prev_actions):
+        # states가 (B, 2), prev_actions가 (B, 3) 형태일 때
+
+        # states의 차이 계산 (첫 번째 요소에서 두 번째 요소 빼기)
+        x_diff = states[:, 0] - states[:, 1]  # (B, )
+
+        # 차이를 (B, 1) 형태로 변환
+        x_diff = x_diff.unsqueeze(1)  # (B, 1)
+
+        # prev_actions는 (B, 3) 형태로 들어오므로, 차이값과 결합하여 (B, 4) 크기 만들기
+        x = torch.cat([x_diff, prev_actions], dim=-1)  # (B, 4)
+
+        # 네트워크를 통과시키기
+        x = torch.relu(self.fc_input(x))  # (B, 64)
+        x = torch.relu(self.fc1(x))       # (B, 64)
+        x = torch.relu(self.fc2(x))       # (B, 64)
+
+        # 최종 출력: 3개의 Q-values
+        q_values = self.fc_out(x)         # (B, 3)
+
+        return q_values
