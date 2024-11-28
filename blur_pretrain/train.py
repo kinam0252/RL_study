@@ -58,8 +58,8 @@ class BlurDataset(torch.utils.data.Dataset):
 
 # 하이퍼파라미터 및 경로 설정
 dataset_dir = "data/dataset_100"
-initial_batch_size = 64
-min_batch_size = 32
+initial_batch_size = 32
+min_batch_size = 4
 learning_rate = 1e-4
 num_epochs = 1000
 save_interval = 10  # 몇 에포크마다 체크포인트 저장할지 설정
@@ -81,6 +81,7 @@ def create_dataloader(batch_size):
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = ComplexDQN(input_image_channels=6, action_size=3)  # Grayscale이므로 채널 수 1
 model.to(device)
+print(f"default device: {device}")
 
 # 손실 함수 및 옵티마이저 초기화
 criterion = nn.MSELoss()
@@ -107,12 +108,15 @@ best_checkpoint_path = f"{checkpoint_dir}/best_model_checkpoint.pth"
 start_epoch = 0
 best_loss = float('inf')  # 초기값으로 무한대 설정
 
-if os.path.exists(latest_checkpoint_path):
-    start_epoch = load_checkpoint(latest_checkpoint_path)
+if os.path.exists(best_checkpoint_path):
+    start_epoch = load_checkpoint(best_checkpoint_path)
 
 # 학습 루프
 current_batch_size = initial_batch_size
 dataloader = create_dataloader(current_batch_size)
+
+warmup = 50
+batch_warmup = 50
 
 for epoch in range(start_epoch, num_epochs):
     model.train()
@@ -139,7 +143,7 @@ for epoch in range(start_epoch, num_epochs):
     print(f"Epoch [{epoch + 1}/{num_epochs}], Loss: {avg_loss:.4f}")
 
     # 배치 크기 조정
-    if (epoch + 1) % 10 == 0 and current_batch_size > min_batch_size:
+    if epoch > warmup and (epoch + 1) % batch_warmup == 0 and current_batch_size > min_batch_size:
         current_batch_size = max(min_batch_size, current_batch_size // 2)
         dataloader = create_dataloader(current_batch_size)
         print(f"Batch size reduced to {current_batch_size}")
@@ -156,7 +160,8 @@ for epoch in range(start_epoch, num_epochs):
     scheduler.step(avg_loss)
 
     # best checkpoint 업데이트
-    if avg_loss < best_loss:
+    if epoch > warmup and avg_loss < best_loss:
+        print(f"Saving best checkpoint at {best_checkpoint_path}")
         best_loss = avg_loss
         torch.save({
             'epoch': epoch + 1,

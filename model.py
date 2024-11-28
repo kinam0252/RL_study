@@ -143,27 +143,27 @@ import torch.nn.functional as F
 class ComplexDQN(nn.Module):
     def __init__(self, input_image_channels, action_size):
         super(ComplexDQN, self).__init__()
+        
         # Convolutional layers
         self.conv1 = nn.Conv2d(input_image_channels, 64, kernel_size=5, stride=2, padding=2)
         self.bn1 = nn.BatchNorm2d(64)
         self.conv2 = nn.Conv2d(64, 128, kernel_size=5, stride=2, padding=2)
         self.bn2 = nn.BatchNorm2d(128)
         self.conv3 = nn.Conv2d(128, 256, kernel_size=5, stride=2, padding=2)
-        self.bn3 = nn.BatchNormd(512)
+        self.bn3 = nn.BatchNorm2d(256)
+        self.conv4 = nn.Conv2d(256, 512, kernel_size=3, stride=2, padding=1)
+        self.bn4 = nn.BatchNorm2d(512)
         
         # Shared fully connected layers
-        self.shared_fc1 = nn.Linea2d(256)
-        self.conv4 = nn.Conv2d(256, 512, kernel_size=3, stride=2, padding=1)
-        self.bn4 = nn.BatchNorm2r(512 * 16 * 16, 512 * 2 * 2)
-        self.shared_fc2 = nn.Linear(512 * 2 * 2, 512)
-
+        self.shared_fc1 = nn.Linear(512 * 16 * 16, 512)  # Update based on output shape
+        self.shared_fc2 = nn.Linear(512, 512)
+        
         # Blur-specific fully connected layer
         self.blur_fc3 = nn.Linear(512, 2)  # Predict blur values for two images
-
+        
         # Q-value specific layers
-        self.fc_reduce = nn.Linear(512, 64)  # Reduce to 64 dimensions for concatenation
-        self.action_embedding = nn.Linear(3, 64)
-        self.q_fc1 = nn.Linear(64 + 64, 512)
+        self.action_embedding = nn.Linear(3, 16)  # Embedding action into 16 dimensions
+        self.q_fc1 = nn.Linear(16 + 16 + 16, 512)  # 16 (blur1) + 16 (blur2) + 16 (action) = 48
         self.q_fc2 = nn.Linear(512, action_size)
 
     def freeze_shared_layers(self):
@@ -189,7 +189,7 @@ class ComplexDQN(nn.Module):
         x = F.relu(self.bn3(self.conv3(x)))
         x = F.relu(self.bn4(self.conv4(x)))
         x = x.view(x.size(0), -1)  # Flatten the features
-
+        
         # Shared fully connected layers
         x = F.relu(self.shared_fc1(x))
         x = F.relu(self.shared_fc2(x))
@@ -197,15 +197,26 @@ class ComplexDQN(nn.Module):
         if mode == "Q":
             # Q-value prediction
             assert previous_action is not None, "previous_action is required for Q-value prediction."
-            reduced_x = F.relu(self.fc_reduce(x))
-            action_embed = F.relu(self.action_embedding(previous_action))
-            combined = torch.cat([reduced_x, action_embed], dim=1)
-            x = F.relu(self.q_fc1(combined))
-            return self.q_fc2(x)
+            
+            # Blur prediction (get two values from blur_fc3)
+            blur_values = self.blur_fc3(x)  # Shape: (batch_size, 2)
+            
+            # Expand each blur value to 16 dimensions
+            blur_16 = F.relu(self.action_embedding(blur_values))  # Shape: (batch_size, 16)
+            
+            # Action embedding (convert action to 16 dimensions)
+            action_embed = F.relu(self.action_embedding(previous_action))  # Shape: (batch_size, 16)
+            
+            # Concatenate blur and action embeddings to form a 48-dimensional vector
+            combined = torch.cat([blur_16, action_embed], dim=1)  # Shape: (batch_size, 48)
+            
+            # Further processing for Q-value prediction
+            x = F.relu(self.q_fc1(combined))  # Shape: (batch_size, 512)
+            return self.q_fc2(x)  # Q-value prediction
 
         elif mode == "blur":
-            # Blur value prediction
-            return self.blur_fc3(x)  # Output two blur values
+            # Blur value prediction (using the blur-specific layer)
+            return self.blur_fc3(x)
 
         else:
             raise ValueError(f"Invalid mode: {mode}. Choose 'Q' or 'blur'.")
