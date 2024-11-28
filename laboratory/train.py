@@ -16,6 +16,85 @@ os.makedirs(checkpoint_dir, exist_ok=True)
 
 DEBUG = True
 
+def train_step(model, env, optimizer, replay_buffer, replay_batch_size, gamma, debug_mode=False):
+    """
+    Perform one training step: sample a batch from the replay buffer,
+    compute Q-values, compute loss, and update the model.
+
+    Parameters:
+    - model (torch.nn.Module): The neural network model.
+    - env (Environment): The environment for focal length adjustment.
+    - optimizer (torch.optim.Optimizer): Optimizer for model parameters.
+    - replay_buffer (ReplayBuffer): The replay buffer to sample from.
+    - replay_batch_size (int): Batch size for training.
+    - gamma (float): Discount factor for future rewards.
+    - debug_mode (bool): Whether to print debug information.
+
+    Returns:
+    - loss (torch.Tensor): The computed loss for this step.
+    """
+    if len(replay_buffer) < replay_batch_size:
+        return None
+
+    # 1. Replay Buffer에서 배치 샘플링
+    batch = replay_buffer.sample(replay_batch_size)
+    prev_focal_lengths_batch, curr_focal_lengths_batch, prev_actions_batch, chosen_actions_batch = zip(*batch)
+
+    # 2. Q-value 예측을 위한 입력 데이터 준비
+    prev_blur_batch = [env.get_blur_amount(prev_focal_lengths_batch[i], env.gt_focal_lengths[i]) for i in range(replay_batch_size)]
+    curr_blur_batch = [env.get_blur_amount(curr_focal_lengths_batch[i], env.gt_focal_lengths[i]) for i in range(replay_batch_size)]
+    
+    input_data_batch = torch.tensor(
+        np.array([[prev_blur_batch[i], curr_blur_batch[i], prev_actions_batch[i]] for i in range(replay_batch_size)], dtype=np.float32),
+        dtype=torch.float32
+    )
+
+    # 3. 모델을 통한 Q-value 예측
+    q_values = model(input_data_batch)
+
+    # 4. 최대 Q-value 계산 (다음 상태에서 가장 높은 Q-value)
+    next_q_values = []
+    for i in range(replay_batch_size):
+        next_q_values.append(torch.max(q_values[i]))  # Q-value에서 최대값을 선택
+    next_q_values = torch.tensor(next_q_values, dtype=torch.float32)
+
+    # 5. 타겟 Q-value 계산 (보상 + 할인된 미래 보상)
+    rewards = [env.get_reward(chosen_actions_batch[i]) for i in range(replay_batch_size)]  # 현재 보상 계산
+    target_q_values = torch.tensor(rewards, dtype=torch.float32) + gamma * next_q_values
+
+    # 6. 손실 계산
+    action_indices = torch.tensor(chosen_actions_batch, dtype=torch.long)
+    predicted_q_values_for_actions = q_values.gather(1, action_indices.view(-1, 1))  # 선택된 액션의 Q-value
+    loss = F.mse_loss(predicted_q_values_for_actions.view(-1), target_q_values)
+
+    # 7. Backpropagation
+    optimizer.zero_grad()  # 기울기 초기화
+    loss.backward()  # 기울기 계산
+    optimizer.step()  # 모델 파라미터 업데이트
+
+    return loss
+
+class ReplayBuffer:
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.buffer = []
+    
+    def push(self, experience):
+        # Add experience to buffer
+        if len(self.buffer) >= self.capacity:
+            self.buffer.pop(0)  # Remove the oldest experience if buffer is full
+        self.buffer.append(experience)
+    
+    def sample(self, batch_size):
+        # Sample a batch from the buffer
+        indices = random.sample(range(len(self.buffer)), batch_size)
+        return [self.buffer[idx] for idx in indices]
+    
+    def size(self):
+        return len(self.buffer)
+    
+replay_buffer = ReplayBuffer(capacity=10000)
+
 # 2. RL 환경: focal length와 blur amount로 학습
 class FocalLengthEnv:
     def __init__(self, image_batch_size):
@@ -145,20 +224,12 @@ def train(model, env, optimizer, scheduler, epsilon_start=0.7, epsilon_end=0.01,
                 if debug_mode:
                     print(f"[DEBUG] Model actions taken. actions: {chosen_actions[0]}")
 
+            experience = (prev_focal_lengths, curr_focal_lengths, prev_actions, chosen_actions)
+            replay_buffer.push(experience)
+
             # 환경에서 현재 focal length와 보상 계산
             _, rewards = env.step(chosen_actions)
             total_reward += sum(rewards)
-
-            # Loss 계산 (보상 반영)
-            loss = -torch.mean(torch.tensor(rewards, dtype=torch.float32, requires_grad=True))
-
-            # Backpropagation
-            optimizer.zero_grad()  # 기울기 초기화
-            loss.backward()  # Backpropagation으로 기울기 계산
-            optimizer.step()  # 파라미터 업데이트
-
-            # Scheduler step
-            scheduler.step()
 
             # 디버그 모드에서 첫 번째 배치 요소에 대한 자세한 정보 출력
             if DEBUG:
@@ -182,6 +253,12 @@ def train(model, env, optimizer, scheduler, epsilon_start=0.7, epsilon_end=0.01,
 
         # epsilon 값 감소 (점진적으로 epsilon 값을 줄임)
         epsilon = max(epsilon_end, epsilon * epsilon_decay)
+
+        loss = train_step(model, env, optimizer, replay_buffer, replay_batch_size, gamma, debug_mode)
+
+        if loss is not None:
+            # Scheduler step
+            scheduler.step()
 
         # 일정 에폭마다 체크포인트 저장
         if (epoch + 1) % 10 == 0:
