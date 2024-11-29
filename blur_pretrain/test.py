@@ -2,104 +2,94 @@ import os
 import torch
 from torchvision import transforms
 from PIL import Image, ImageDraw, ImageFont
-from model import ComplexDQN  # 학습된 모델 로드
+from model import ComplexDQN  # 모델 불러오기
+from utils import BlurDataset
+from torchvision.transforms import Normalize
 
-# 데이터셋 클래스 정의 (기존 코드와 동일)
-class BlurDataset(torch.utils.data.Dataset):
-    def __init__(self, dataset_dir, transform=None):
-        self.dataset_dir = dataset_dir
-        self.image_files = [f for f in os.listdir(dataset_dir) if f.endswith('.jpg')]
-        self.transform = transform
+class ReverseNormalize:
+    def __init__(self, mean, std):
+        self.mean = mean
+        self.std = std
 
-    def __len__(self):
-        return len(self.image_files)
+    def __call__(self, tensor):
+        for t, m, s in zip(tensor, self.mean, self.std):
+            t.mul_(s).add_(m)  # 정규화를 해제
+        return tensor
 
-    def __getitem__(self, idx):
-        # 이미지와 레이블 파일 이름
-        image_path = os.path.join(self.dataset_dir, self.image_files[idx])
-        label_path = os.path.splitext(image_path)[0] + ".txt"
+# 결과 저장 경로 생성
+sample_dir = "blur_pretrain/samples/"
+os.makedirs(sample_dir, exist_ok=True)
 
-        # 이미지 읽기
-        image = Image.open(image_path).convert("L")  # Grayscale 전환
-
-        # 이미지를 두 개로 분리
-        w, h = image.size
-        half_w = w // 2
-        image1 = image.crop((0, 0, half_w, h))  # 왼쪽 이미지
-        image2 = image.crop((half_w, 0, w, h))  # 오른쪽 이미지
-
-        # Transform 각각 적용
-        if self.transform:
-            image1 = self.transform(image1)
-            image2 = self.transform(image2)
-
-        # 이미지 스택
-        images = torch.stack([image1, image2], dim=0)
-
-        # 레이블 읽기
-        with open(label_path, 'r') as f:
-            labels = f.readline().strip().split()
-            blur_label1, blur_label2 = map(float, labels)
-
-        return images, torch.tensor([blur_label1, blur_label2], dtype=torch.float32), image_path
-
-# 설정
-dataset_dir = "data/dataset"
-samples_dir = "blur_pretrain/samples/"
-os.makedirs(samples_dir, exist_ok=True)
-model_path = "blur_pretrain/checkpoints/best_model_checkpoint.pth"  # 학습된 모델 경로
-num_samples = 10  # 추출할 이미지 개수
-
-# 데이터 전처리
-transform = transforms.Compose([
-    transforms.ToTensor(),  # Tensor로 변환
-    transforms.Resize((256, 256)),
-    transforms.Normalize((0.5,), (0.5,))  # 정규화
-])
-
-# 데이터셋 및 데이터 로더
-dataset = BlurDataset(dataset_dir, transform=transform)
-dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=True)
-
-# 모델 로드
+# 체크포인트 로드
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = ComplexDQN(input_image_channels=2, action_size=3)  # Grayscale이므로 채널 수 1
-checkpoint = torch.load(model_path, map_location=device)
-model.load_state_dict(checkpoint['model_state_dict'])
+model = ComplexDQN(input_image_channels=6, action_size=3)
 model.to(device)
-model.eval()
 
-# 샘플 추출 및 저장
-font_path = "/scratch/slurm-user25-kaist/user/kinamkim/Roboto-Bold.ttf"  # 시스템 폰트 경로 (수정 필요)
-for idx, (images, gt_blurs, image_path) in enumerate(dataloader):
-    if idx >= num_samples:
-        break
+checkpoint_path = "blur_pretrain/checkpoints/best_model_checkpoint.pth"
+if os.path.exists(checkpoint_path):
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    print(f"Checkpoint loaded from {checkpoint_path}")
+else:
+    raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
 
-    # 이미지 이름 추출
-    image_name = os.path.basename(image_path[0])
+# 데이터셋 경로 및 전처리
+dataset_dir = "data/dataset_100"
+dataset = BlurDataset(dataset_dir)
 
-    # 모델 예측
-    images = images.view(images.size(0), -1, images.size(3), images.size(4)).to(device)  # (batch_size, C * 2, H, W)
-    with torch.no_grad():
-        pred_blurs = model(images, mode="blur").cpu().numpy()
+# 시각화 함수
+def visualize_and_save(image, pred_blur, gt_blur, index, save_dir):
+    """이미지와 예측값, GT값을 하나의 이미지로 시각화하여 저장"""
+    reverse_normalize = ReverseNormalize(mean=(0.5,), std=(0.5,))
+    
+    # 두 이미지를 하나로 합치기
+    image1_tensor = reverse_normalize(image[0:3])  # 첫 번째 이미지 해제
+    image2_tensor = reverse_normalize(image[3:6])  # 두 번째 이미지 해제
 
-    # 원본 이미지 로드
-    original_image = Image.open(image_path[0]).convert("RGB")
+    # 이미지 데이터를 [0, 255] 범위로 변환 후 PIL 이미지로 변환
+    image1 = transforms.ToPILImage()(image1_tensor.clamp(0, 1))
+    image2 = transforms.ToPILImage()(image2_tensor.clamp(0, 1))
 
-    # 시각화 생성
-    combined_image = Image.new("RGB", (original_image.width, original_image.height + 100), (255, 255, 255))
-    combined_image.paste(original_image, (0, 0))
+    # 가로로 이미지를 결합
+    combined_image_width = image1.width * 2
+    combined_image_height = image1.height
+    combined_image = Image.new("RGB", (combined_image_width, combined_image_height))
+    combined_image.paste(image1, (0, 0))
+    combined_image.paste(image2, (image1.width, 0))
 
-    # 텍스트 추가
-    draw = ImageDraw.Draw(combined_image)
-    font = ImageFont.truetype(font_path, size=20)
+    # 텍스트 영역 추가
+    text_box_height = 50  # 텍스트 박스 높이
+    total_height = combined_image_height + text_box_height
+    final_image = Image.new("RGB", (combined_image_width, total_height), color="black")
+    final_image.paste(combined_image, (0, 0))
+
+    # Blur 값을 텍스트 박스에 추가
+    draw = ImageDraw.Draw(final_image)
+    font = ImageFont.load_default()
     text = (
-        f"GT Blur: {gt_blurs[0, 0]:.2f}, {gt_blurs[0, 1]:.2f}\n"
-        f"Pred Blur: {pred_blurs[0, 0]:.2f}, {pred_blurs[0, 1]:.2f}"
+        f"Predicted Blur: {pred_blur[0]:.4f}, {pred_blur[1]:.4f}\n"
+        f"GT Blur: {gt_blur[0]:.4f}, {gt_blur[1]:.4f}"
     )
-    draw.text((10, original_image.height + 10), text, fill=(0, 0, 0), font=font)
+    text_x = 10
+    text_y = combined_image_height + 10  # 텍스트 박스 내부 여백
+    draw.text((text_x, text_y), text, fill="white", font=font)
 
     # 저장
-    combined_image.save(os.path.join(samples_dir, f"sample_{idx + 1}_{image_name}"))
+    save_path = os.path.join(save_dir, f"sample_{index + 1}.png")
+    final_image.save(save_path)
+    print(f"Saved sample {index + 1} at {save_path}")
 
-print(f"{num_samples} samples saved to {samples_dir}")
+# 테스트
+model.eval()
+num_samples = 100  # 사용자 지정 샘플 개수
+with torch.no_grad():
+    for i in range(num_samples):
+        image, gt_blur = dataset[i]  # 데이터셋에서 샘플 가져오기
+        image = image.to(device).view(1, -1, image.size(2), image.size(3))  # 배치 추가
+        gt_blur = gt_blur.to(device)
+
+        # 예측
+        pred_blur = model(image, mode="blur").squeeze(0)  # 예측 결과
+        visualize_and_save(image.squeeze(0), pred_blur, gt_blur, i, sample_dir)
+
+print(f"All samples saved in {sample_dir}")

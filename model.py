@@ -162,16 +162,18 @@ class ComplexDQN(nn.Module):
         self.blur_fc3 = nn.Linear(512, 2)  # Predict blur values for two images
         
         # Q-value specific layers
-        self.action_embedding = nn.Linear(3, 16)  # Embedding action into 16 dimensions
-        self.q_fc1 = nn.Linear(16 + 16 + 16, 512)  # 16 (blur1) + 16 (blur2) + 16 (action) = 48
-        self.q_fc2 = nn.Linear(512, action_size)
-
+        self.fc_input = nn.Linear(4, 64)
+        self.fc1 = nn.Linear(64, 64)
+        self.fc2 = nn.Linear(64, 64)
+        self.fc_out = nn.Linear(64, 3)  # Output Q-values for three actions
+        
+        
     def freeze_shared_layers(self):
         """
         Freeze the shared layers by setting requires_grad to False.
         """
         for layer in [self.conv1, self.bn1, self.conv2, self.bn2, self.conv3, self.bn3, self.conv4, self.bn4, 
-                      self.shared_fc1, self.shared_fc2]:
+                      self.shared_fc1, self.shared_fc2, self.blur_fc3]:
             for param in layer.parameters():
                 param.requires_grad = False
 
@@ -201,18 +203,21 @@ class ComplexDQN(nn.Module):
             # Blur prediction (get two values from blur_fc3)
             blur_values = self.blur_fc3(x)  # Shape: (batch_size, 2)
             
-            # Expand each blur value to 16 dimensions
-            blur_16 = F.relu(self.action_embedding(blur_values))  # Shape: (batch_size, 16)
+            blur_0 = blur_values[:, 0].unsqueeze(1)  # Shape: (batch_size, 1)
+            blur_1 = blur_values[:, 1].unsqueeze(1)  # Shape: (batch_size, 1)
+            blur_diff = blur_0 - blur_1  # Shape: (batch_size, 1)
             
-            # Action embedding (convert action to 16 dimensions)
-            action_embed = F.relu(self.action_embedding(previous_action))  # Shape: (batch_size, 16)
+            x = torch.cat([blur_diff, previous_action], dim=1)  # Shape: (batch_size, 4)
             
-            # Concatenate blur and action embeddings to form a 48-dimensional vector
-            combined = torch.cat([blur_16, action_embed], dim=1)  # Shape: (batch_size, 48)
+            # 네트워크를 통과시키기
+            x = torch.relu(self.fc_input(x))  # (B, 64)
+            x = torch.relu(self.fc1(x))       # (B, 64)
+            x = torch.relu(self.fc2(x))       # (B, 64)
+
+            # 최종 출력: 3개의 Q-values
+            q_values = self.fc_out(x)         # (B, 3)
             
-            # Further processing for Q-value prediction
-            x = F.relu(self.q_fc1(combined))  # Shape: (batch_size, 512)
-            return self.q_fc2(x)  # Q-value prediction
+            return q_values
 
         elif mode == "blur":
             # Blur value prediction (using the blur-specific layer)

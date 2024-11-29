@@ -7,6 +7,7 @@ from PIL import Image
 from model import ComplexDQN  # 모델 불러오기
 
 import torchvision.transforms.functional as F
+from utils import BlurDataset
 
 def pad_to_square(image):
     """이미지를 정사각형으로 패딩합니다."""
@@ -17,49 +18,10 @@ def pad_to_square(image):
     padding = [pad_w // 2, pad_h // 2, pad_w - pad_w // 2, pad_h - pad_h // 2]  # 좌우, 상하
     return F.pad(image, padding, fill=0)
 
-# 데이터셋 클래스 정의
-class BlurDataset(torch.utils.data.Dataset):
-    def __init__(self, dataset_dir, transform=None):
-        self.dataset_dir = dataset_dir
-        self.image_files = [f for f in os.listdir(dataset_dir) if f.endswith('.jpg')]
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.image_files)
-
-    def __getitem__(self, idx):
-        # 이미지와 레이블 파일 이름
-        image_path = os.path.join(self.dataset_dir, self.image_files[idx])
-        label_path = os.path.splitext(image_path)[0] + ".txt"
-
-        # 이미지 읽기
-        image = Image.open(image_path).convert("RGB")
-
-        # 이미지를 두 개로 분리
-        w, h = image.size
-        half_w = w // 2
-        image1 = image.crop((0, 0, half_w, h))  # 왼쪽 이미지
-        image2 = image.crop((half_w, 0, w, h))  # 오른쪽 이미지
-
-        # Transform 각각 적용
-        if self.transform:
-            image1 = self.transform(image1)
-            image2 = self.transform(image2)
-
-        # 이미지 스택
-        images = torch.stack([image1, image2], dim=0)
-
-        # 레이블 읽기
-        with open(label_path, 'r') as f:
-            labels = f.readline().strip().split()
-            blur_label1, blur_label2 = map(float, labels)
-
-        return images, torch.tensor([blur_label1, blur_label2], dtype=torch.float32)
-
 # 하이퍼파라미터 및 경로 설정
 dataset_dir = "data/dataset_100"
-initial_batch_size = 32
-min_batch_size = 4
+initial_batch_size = 64
+min_batch_size = 16
 learning_rate = 1e-4
 num_epochs = 1000
 save_interval = 10  # 몇 에포크마다 체크포인트 저장할지 설정
@@ -73,7 +35,7 @@ transform = transforms.Compose([
 ])
 
 # 데이터셋 및 데이터 로더 생성 함수
-dataset = BlurDataset(dataset_dir, transform=transform)
+dataset = BlurDataset(dataset_dir)
 def create_dataloader(batch_size):
     return torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
 

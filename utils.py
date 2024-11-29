@@ -15,6 +15,60 @@ DATASET_DIR = 'data/'
 BLUR_DIR = "data/dataset"
 TEST_DIR = "data/dataset/test"
 
+
+class BlurDataset(torch.utils.data.Dataset):
+    def __init__(self, dataset_dir, mode = "blur"):
+        self.mode = mode
+        self.dataset_dir = dataset_dir
+        self.image_files = [f for f in os.listdir(dataset_dir) if f.endswith('.jpg')]
+        # 데이터 전처리
+        transform = transforms.Compose([
+            transforms.ToTensor(),  # Tensor로 변환
+            transforms.Lambda(pad_to_square),  # 패딩 적용
+            transforms.Resize((256, 256)),
+            transforms.Normalize((0.5,), (0.5,))  # 정규화
+        ])
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.image_files)
+
+    def __getitem__(self, idx):
+        if self.mode == "Q":
+            dataset_dir = os.path.join(self.dataset_dir, "original")
+            image_path = os.path.join(dataset_dir, self.image_files[idx][:-6] + ".jpg")
+            image = Image.open(image_path).convert("RGB")
+            image = self.transform(image)
+            return image
+            
+        # 이미지와 레이블 파일 이름
+        image_path = os.path.join(self.dataset_dir, self.image_files[idx])
+        label_path = os.path.splitext(image_path)[0] + ".txt"
+
+        # 이미지 읽기
+        image = Image.open(image_path).convert("RGB")
+
+        # 이미지를 두 개로 분리
+        w, h = image.size
+        half_w = w // 2
+        image1 = image.crop((0, 0, half_w, h))  # 왼쪽 이미지
+        image2 = image.crop((half_w, 0, w, h))  # 오른쪽 이미지
+
+        # Transform 각각 적용
+        if self.transform:
+            image1 = self.transform(image1)
+            image2 = self.transform(image2)
+
+        # 이미지 스택
+        images = torch.stack([image1, image2], dim=0)
+
+        # 레이블 읽기
+        with open(label_path, 'r') as f:
+            labels = f.readline().strip().split()
+            blur_label1, blur_label2 = map(float, labels)
+
+        return images, torch.tensor([blur_label1, blur_label2], dtype=torch.float32)
+
 def pad_to_square(image):
     """이미지를 정사각형으로 패딩합니다."""
     c, h, w = image.shape
