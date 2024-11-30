@@ -6,6 +6,16 @@ from model import ComplexDQN  # 모델 불러오기
 from utils import BlurDataset
 from torchvision.transforms import Normalize
 
+def initialize_from_pretrained(model, checkpoint_path, device):
+    pretrained_weights = torch.load(checkpoint_path, map_location=device)["model_state_dict"]
+    model_dict = model.state_dict()
+    pretrained_dict = {k: v for k, v in pretrained_weights.items() if k in model_dict}
+    print(f"Pretrained keys: {pretrained_dict.keys()}")
+    model_dict.update(pretrained_dict)
+    model.load_state_dict(model_dict)
+    model.freeze_shared_layers()
+    print(f"Model initialized from pretrained weights at {checkpoint_path}")
+
 class ReverseNormalize:
     def __init__(self, mean, std):
         self.mean = mean
@@ -27,8 +37,7 @@ model.to(device)
 
 checkpoint_path = "blur_pretrain/checkpoints/best_model_checkpoint.pth"
 if os.path.exists(checkpoint_path):
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    initialize_from_pretrained(model, checkpoint_path, device)
     print(f"Checkpoint loaded from {checkpoint_path}")
 else:
     raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
@@ -89,7 +98,19 @@ with torch.no_grad():
         gt_blur = gt_blur.to(device)
 
         # 예측
+        # from utils import save_visualized_images, print_tensor_info
+        # print_tensor_info(image, "Input image")
+        # save_visualized_images(image, save_dir="visualize/blur_pretrain")
+        tensor_dir = "tensor"
+        os.makedirs(tensor_dir, exist_ok=True)
+        torch.save(image, os.path.join(tensor_dir, "input.pt"))
+        print(f"Saved input tensor at {os.path.join(tensor_dir, 'input.pt')}")
+        
         pred_blur = model(image, mode="blur").squeeze(0)  # 예측 결과
+        
+        print(f"pred_blur = {pred_blur}")
+        assert 0
+        
         visualize_and_save(image.squeeze(0), pred_blur, gt_blur, i, sample_dir)
 
 print(f"All samples saved in {sample_dir}")

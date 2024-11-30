@@ -5,19 +5,28 @@ import random
 import shutil
 from torchvision import transforms
 from model import ResNetDQN, ComplexDQN
-from utils import apply_blur, calculate_reward
+from utils import apply_blur, calculate_reward, BlurDataset
 from PIL import Image
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # 모델 체크포인트 로드
-def load_checkpoint(checkpoint_path, model, optimizer):
+def load_checkpoint(checkpoint_path, model):
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     episode = checkpoint['episode']
     print(f"Loaded checkpoint from episode {episode}.")
-    return model, optimizer, episode
+    return model
+
+def initialize_from_pretrained(model, checkpoint_path, device):
+    pretrained_weights = torch.load(checkpoint_path, map_location=device)["model_state_dict"]
+    model_dict = model.state_dict()
+    pretrained_dict = {k: v for k, v in pretrained_weights.items() if k in model_dict}
+    print(f"Pretrained keys: {pretrained_dict.keys()}")
+    model_dict.update(pretrained_dict)
+    model.load_state_dict(model_dict)
+    model.freeze_shared_layers()
+    print(f"Model initialized from pretrained weights at {checkpoint_path}")
 
 def load_images_from_checkpoint(checkpoint_path, image_size=(256, 256)):
     images_dir = os.path.join(os.path.dirname(checkpoint_path), "images")
@@ -45,7 +54,7 @@ def load_images_from_checkpoint(checkpoint_path, image_size=(256, 256)):
 
 
 # 개별 트라이얼 폴더 생성 및 이미지 저장
-def save_image(image, save_path):
+def save_image(image, save_path,):
     to_pil = transforms.ToPILImage()
     image_pil = to_pil(image)
     image_resized = image_pil.resize((128, 128), resample=Image.BILINEAR)
@@ -58,7 +67,7 @@ def create_trial_folder(sample_dir="sample", trial_name="trial"):
     return trial_folder
 
 # 트라이얼 수행
-def run_trial(model, trial_folder, image, gt_focal_length, num_steps):
+def run_trial(model, trial_folder, image, gt_focal_length, num_steps, org_image):
     focal_0 = max(0, min(30, gt_focal_length + random.choice([-5, 5])))
     focal_1 = max(0, min(30, focal_0 + random.choice([-1, 0, 1])))
     image_0 = apply_blur(image, focal_0, gt_focal_length).to(device)
@@ -74,6 +83,7 @@ def run_trial(model, trial_folder, image, gt_focal_length, num_steps):
 
         new_focal = max(0, min(30, focal_1 + (1 if action == 1 else -1 if action == 0 else 0))) 
         new_image = apply_blur(image, new_focal, gt_focal_length).to(device)
+        blurred_image = apply_blur(org_image, new_focal, gt_focal_length)
         
         reward = calculate_reward(focal_1, new_focal, gt_focal_length, prev_action.argmax().item(), action)
         print(f"Step {step}: Focal Length: {focal_1} -> {new_focal}, Action: {action} Reward: {reward}")
@@ -82,40 +92,44 @@ def run_trial(model, trial_folder, image, gt_focal_length, num_steps):
         next_state = torch.cat([image_1, new_image], dim=0).unsqueeze(0).to(device)
         next_prev_action = F.one_hot(torch.tensor(action), num_classes=3).float().to(device)
 
-        save_image(new_image, os.path.join(trial_folder, f"step_{step}.png"))
+        save_image(blurred_image, os.path.join(trial_folder, f"step_{step}.png"))
 
         state, prev_action, image_1, focal_1 = next_state, next_prev_action, new_image, new_focal
 
     print(f"Trial completed. Total Reward: {total_reward}")
 
 # DQN 테스트 함수
-def test_dqn(checkpoint_path, num_trials=3, num_steps=10):
+def test_dqn(checkpoint_path, num_trials=3, num_steps=10, num_samples=100):
     pretrained_checkpoint = "blur_pretrain/checkpoint/blur_predictor_epoch_250.pth"
     
     model_mode = "complex"
     if model_mode == "complex":
-        model = ComplexDQN(input_image_channels=2, action_size=3).to(device)
+        model = ComplexDQN(input_image_channels=6, action_size=3).to(device)
     elif model_mode == "resnet":
         model = ResNetDQN(input_image_channels=1, action_size=3).to(device)
         # initialize_from_pretrained(model, pretrained_checkpoint, device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    model, optimizer, _ = load_checkpoint(checkpoint_path, model, optimizer)
+    model = load_checkpoint(checkpoint_path, model)
 
     # 학습 시 사용한 이미지 로드
-    images = load_images_from_checkpoint(checkpoint_path, image_size=(256, 256))
+    dataset_dir = "data/dataset_100"
+    dataset = BlurDataset(dataset_dir, mode="Q")
+    
     sample_dir = "sample"
     if os.path.exists(sample_dir):
         shutil.rmtree(sample_dir)
     os.makedirs(sample_dir)
 
-    for image in images:
+    datasets = [dataset[i] for i in range(num_samples)]
+
+    for image, org_image in datasets:
+        org_image = transforms.ToTensor()(org_image)
         for trial in range(num_trials):
             trial_folder = create_trial_folder(sample_dir=sample_dir, trial_name="test")
             gt_focal_length = random.randint(5, 25)
             print(f"Starting trial {trial + 1} for with GT Focal Length: {gt_focal_length}")
-            run_trial(model, trial_folder, image, gt_focal_length, num_steps)
+            run_trial(model, trial_folder, image, gt_focal_length, num_steps, org_image)
 
 if __name__ == "__main__":
-    checkpoint_path = "/scratch/slurm-user25-kaist/user/kinamkim/RL-study-code/checkpoints/2024-11-19_16-08/latest_checkpoint.pth"
-    test_dqn(checkpoint_path, num_trials=10, num_steps=10)
+    checkpoint_path = "/home/nas2_userG/junhahyung/kkn/RL_study/checkpoints/latest_checkpoint.pth"
+    test_dqn(checkpoint_path, num_trials=5, num_steps=10)

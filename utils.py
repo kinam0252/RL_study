@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 import torch.nn.functional as F
 import torchvision.transforms.functional as F2
+from torchvision.transforms import ToPILImage
 
 CUSTOM_DATA_DIR = 'data/custom'
 DEFOCUS_DIR = 'data/1000'
@@ -36,10 +37,12 @@ class BlurDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         if self.mode == "Q":
             dataset_dir = os.path.join(self.dataset_dir, "original")
-            image_path = os.path.join(dataset_dir, self.image_files[idx][:-6] + ".jpg")
-            image = Image.open(image_path).convert("RGB")
+            image_path = os.path.join(dataset_dir, self.image_files[idx*10][:-6] + ".jpg")
+            image = Image.open(image_path)
+            org_image = image.copy()
+            image = image.convert("RGB")
             image = self.transform(image)
-            return image
+            return image, org_image
             
         # 이미지와 레이블 파일 이름
         image_path = os.path.join(self.dataset_dir, self.image_files[idx])
@@ -78,6 +81,60 @@ def pad_to_square(image):
     padding = [pad_w // 2, pad_h // 2, pad_w - pad_w // 2, pad_h - pad_h // 2]  # 좌우, 상하
     return F2.pad(image, padding, fill=0)
 
+def save_visualized_images(images, save_dir="visualize", step=None):
+    """
+    Visualize and save the input tensor images as RGB images in a specified directory.
+
+    Args:
+        images (torch.Tensor): Tensor of shape (batch_size, C * 2, H, W).
+        batch_index (int): The current batch index to include in the filenames.
+        step (int): The current step to include in the filenames.
+        save_dir (str): Directory where the images will be saved.
+    """
+    # Ensure the directory exists
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Split the tensor into two parts along the channel dimension
+    batch_size, channels, height, width = images.shape
+    assert channels % 6 == 0, "Expected channels to be a multiple of 6 (2 RGB images per pair)."
+    
+    num_pairs = channels // 6  # Each pair has 6 channels (2 RGB images)
+    pair_images = images.view(batch_size, num_pairs, 2, 3, height, width)  # (batch_size, num_pairs, 2, 3, H, W)
+    
+    # Save each image pair
+    to_pil = ToPILImage()
+    b = 0
+    p = 0
+    img_1 = to_pil(pair_images[b, p, 0])  # First image in the pair (RGB)
+    img_2 = to_pil(pair_images[b, p, 1])  # Second image in the pair (RGB)
+    
+    # Concatenate the two images for better visualization
+    combined_width = img_1.width + img_2.width
+    combined_image = Image.new('RGB', (combined_width, img_1.height))
+    combined_image.paste(img_1, (0, 0))
+    combined_image.paste(img_2, (img_1.width, 0))
+    
+    # Save the image with a descriptive name
+    save_path = os.path.join(save_dir, f"image_step_{step}.png")
+    combined_image.save(save_path)
+    print(f"Saved visualization: {save_path}")
+    # assert 0, "Stop here"
+
+def print_tensor_info(tensor, name="Tensor"):
+    """
+    Print shape, min, max, and other information about a tensor.
+
+    Args:
+        tensor (torch.Tensor): The tensor to analyze.
+        name (str): A name for the tensor for logging purposes.
+    """
+    print(f"=== {name} Info ===")
+    print(f"Shape: {tensor.shape}")
+    print(f"Min: {tensor.min().item()}")
+    print(f"Max: {tensor.max().item()}")
+    print(f"Data type: {tensor.dtype}")
+    print(f"Device: {tensor.device}")
+    print("===================")
 
 def load_images(mode='custom', image_size=(256, 256), max_images=None):
     """
@@ -179,6 +236,7 @@ def compute_loss(batch, model, target_model, gamma, optimizer, device):
 
 def apply_blur(image, focal_length, gt_focal_length):
     blur_amount = abs(focal_length - gt_focal_length)
+    blur_amount *= 2
     image_pil = transforms.ToPILImage()(image)
     if blur_amount == 0:
         return image
@@ -197,14 +255,14 @@ def calculate_reward(prev_focal_length, curr_focal_length, gt_focal_length, prev
     # 이전 거리가 0일 때, 현재 거리의 변화에 따른 보상
     if prev_distance == 0:
         if curr_distance == 0:
-            return 10  # 목표를 유지했을 때 양수 보상
+            return 2  # 목표를 유지했을 때 양수 보상
         else:
-            return -10  # 목표에서 벗어난 경우 음수 보상
+            return -2  # 목표에서 벗어난 경우 음수 보상
 
     # 이전보다 개선된 경우 1, 그렇지 않으면 -1 보상
     if curr_distance < prev_distance:
         if curr_distance == 0:
-            return 10
+            return 2
         else:
             return 2  # 개선된 경우
     else:

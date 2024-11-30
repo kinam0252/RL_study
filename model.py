@@ -162,6 +162,8 @@ class ComplexDQN(nn.Module):
         self.blur_fc3 = nn.Linear(512, 2)  # Predict blur values for two images
         
         # Q-value specific layers
+        self.fc_blur1 = nn.Linear(1, 64)
+        self.fc_blur2 = nn.Linear(64, 1)
         self.fc_input = nn.Linear(4, 64)
         self.fc1 = nn.Linear(64, 64)
         self.fc2 = nn.Linear(64, 64)
@@ -206,6 +208,9 @@ class ComplexDQN(nn.Module):
             blur_0 = blur_values[:, 0].unsqueeze(1)  # Shape: (batch_size, 1)
             blur_1 = blur_values[:, 1].unsqueeze(1)  # Shape: (batch_size, 1)
             blur_diff = blur_0 - blur_1  # Shape: (batch_size, 1)
+            
+            blur_diff = self.fc_blur1(blur_diff)  # Shape: (batch_size, 64)
+            blur_diff = self.fc_blur2(blur_diff)  # Shape: (batch_size, 1)
             
             x = torch.cat([blur_diff, previous_action], dim=1)  # Shape: (batch_size, 4)
             
