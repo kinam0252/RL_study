@@ -233,6 +233,81 @@ class ComplexDQN(nn.Module):
         else:
             raise ValueError(f"Invalid mode: {mode}. Choose 'Q' or 'blur'.")
 
+class BlurDQN(nn.Module):
+    def __init__(self, input_image_channels, action_size):
+        super(BlurDQN, self).__init__()
+        
+        # Convolutional layers
+        self.conv1 = nn.Conv2d(input_image_channels, 64, kernel_size=5, stride=2, padding=2)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.conv2 = nn.Conv2d(64, 128, kernel_size=5, stride=2, padding=2)
+        self.bn2 = nn.BatchNorm2d(128)
+        self.conv3 = nn.Conv2d(128, 256, kernel_size=5, stride=2, padding=2)
+        self.bn3 = nn.BatchNorm2d(256)
+        self.conv4 = nn.Conv2d(256, 512, kernel_size=3, stride=2, padding=1)
+        self.bn4 = nn.BatchNorm2d(512)
+        
+        # Fully connected layers
+        self.fc1 = nn.Linear(512 * 16 * 16, 512)
+        self.fc2 = nn.Linear(512, 1)  # Predict blur values for two images
+
+        self.fc_in = nn.Linear(4, 64)
+        self.fc_q1 = nn.Linear(64, 64)
+        self.fc_q2 = nn.Linear(64, 64)
+        self.fc_out = nn.Linear(64, 3)
+
+    def freeze_shared_layers(self):
+        """
+        Freeze the shared layers by setting requires_grad to False.
+        """
+        for layer in [self.conv1, self.bn1, self.conv2, self.bn2, self.conv3, self.bn3, self.conv4, self.bn4, 
+                      self.fc1, self.fc2]:
+            for param in layer.parameters():
+                param.requires_grad = False
+            layer.eval()
+        print(f"Shared layers frozen and Eval mode.")
+
+    def forward(self, image_stack, prev_actions=None, mode="blur"):
+        """
+        Forward pass for blur value prediction.
+        :param image_stack: Tensor of shape (batch_size, 2, 3, H, W)
+        :return: Predicted blur values for two images
+        """
+        assert image_stack.size(2) == 3, "Input image_stack should have 3 channels."
+        is_stacked = (image_stack.size(1) == 2)
+        images = image_stack.view(-1, image_stack.size(2), image_stack.size(3), image_stack.size(4))
+        x = F.relu(self.bn1(self.conv1(images)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = F.relu(self.bn3(self.conv3(x)))
+        x = F.relu(self.bn4(self.conv4(x)))
+        x = x.view(x.size(0), -1)  # Flatten the features
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
+        if mode == "blur":
+            if is_stacked:
+                x = x.view(image_stack.size(0), 2)
+                blur1, blur2 = x.chunk(2, dim=1)
+                blur1 = torch.round(blur1)
+                blur2 = torch.round(blur2)
+                blur = (blur1[0], blur2[0])
+                return blur
+            return x
+        
+        elif mode == "Q":
+            x = x.view(image_stack.size(0), 2)
+            blur1, blur2 = x.chunk(2, dim=1)
+            blur1 = torch.round(blur1)
+            blur2 = torch.round(blur2)
+            blurdiff = blur1 - blur2
+            x = torch.cat([blurdiff, prev_actions], dim=1)
+            x = torch.relu(self.fc_in(x))
+            x = torch.relu(self.fc_q1(x))
+            x = torch.relu(self.fc_q2(x))
+            q_values = self.fc_out(x)
+            return q_values
+        
+        
+
 class RLModel(nn.Module):
     def __init__(self):
         super(RLModel, self).__init__()

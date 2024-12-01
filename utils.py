@@ -46,7 +46,7 @@ class BlurDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         if self.mode == "Q":
             dataset_dir = os.path.join(self.dataset_dir, "original")
-            image_path = os.path.join(dataset_dir, self.image_files[idx*10][:-6] + ".jpg")
+            image_path = os.path.join(dataset_dir, self.image_files[idx*6][:-11] + ".jpg")
             image = Image.open(image_path)
             org_image = image.copy()
             image = image.convert("RGB")
@@ -60,26 +60,14 @@ class BlurDataset(torch.utils.data.Dataset):
         # 이미지 읽기
         image = Image.open(image_path).convert("RGB")
 
-        # 이미지를 두 개로 분리
-        w, h = image.size
-        half_w = w // 2
-        image1 = image.crop((0, 0, half_w, h))  # 왼쪽 이미지
-        image2 = image.crop((half_w, 0, w, h))  # 오른쪽 이미지
-
-        # Transform 각각 적용
-        if self.transform:
-            image1 = self.transform(image1)
-            image2 = self.transform(image2)
-
-        # 이미지 스택
-        images = torch.stack([image1, image2], dim=0)
+        image = self.transform(image)
 
         # 레이블 읽기
         with open(label_path, 'r') as f:
-            labels = f.readline().strip().split()
-            blur_label1, blur_label2 = map(float, labels)
+            labels = f.readline().strip()
+            blur_label = float(labels)
 
-        return images, torch.tensor([blur_label1, blur_label2], dtype=torch.float32)
+        return image, blur_label
 
 def pad_to_square(image):
     """이미지를 정사각형으로 패딩합니다."""
@@ -225,12 +213,13 @@ def compute_loss(batch, model, target_model, gamma, optimizer, device):
     done = done.float().to(device)  # done 텐서를 float 타입으로 변환
 
     # 현재 상태에서 Q 값 계산
-    q_values = model(state, prev_action)
+    q_values = model(state, prev_action, mode="Q")
     current_q = q_values.gather(1, action.unsqueeze(1)).squeeze(1)  # 선택된 액션의 Q 값
 
     # 다음 상태에서 Q 값 계산
-    next_q_values = target_model(next_state, next_prev_action)
+    next_q_values = target_model(next_state, next_prev_action, mode="Q")
     max_next_q = next_q_values.max(1)[0]
+
     expected_q = reward + (1 - done) * gamma * max_next_q  # 타겟 Q 값 계산
 
     # 손실 계산

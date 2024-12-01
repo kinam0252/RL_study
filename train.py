@@ -3,7 +3,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 import random
 from utils import load_images, apply_blur, calculate_reward, ReplayBuffer, save_checkpoint, compute_loss, BlurDataset,transform
-from model import ResNetDQN, ComplexDQN
+from model import ResNetDQN, ComplexDQN, BlurDQN
 from datetime import datetime, timezone, timedelta
 import os
 import numpy as np
@@ -13,7 +13,7 @@ from torchvision import transforms
 from PIL import Image, ImageDraw, ImageFont
 import matplotlib.pyplot as plt
 
-DEBUG = True
+DEBUG = False
 VISUALIZE = False
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -105,7 +105,7 @@ def train_dqn(num_episodes=100000, batch_size=100, replay_batch_size=256, gamma=
     #     pretrained_checkpoint = "blur_pretrain/checkpoints/best_model_checkpoint.pth"
     pretrained_checkpoint = "blur_pretrain/checkpoints/best_model_checkpoint.pth"
     
-    model_mode = "complex"
+    model_mode = "blur"
     
     if model_mode == "resnet":  
         model = ResNetDQN(input_image_channels=6, action_size=3).to(device)
@@ -120,6 +120,14 @@ def train_dqn(num_episodes=100000, batch_size=100, replay_batch_size=256, gamma=
         initialize_from_pretrained(model, pretrained_checkpoint, device)
         model.freeze_shared_layers()
         target_model.load_state_dict(model.state_dict())
+    elif model_mode == "blur":
+        model = BlurDQN(input_image_channels=3, action_size=3).to(device)
+        target_model = BlurDQN(input_image_channels=3, action_size=3).to(device)
+        initialize_from_pretrained(model, pretrained_checkpoint, device)
+        target_model.load_state_dict(model.state_dict())
+        model.freeze_shared_layers()
+        target_model.freeze_shared_layers()
+        
         
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     epsilon = epsilon_start
@@ -148,9 +156,9 @@ def train_dqn(num_episodes=100000, batch_size=100, replay_batch_size=256, gamma=
         image_1s = process_images_in_list(image_1s)
 
         prev_actions = [F.one_hot(torch.tensor(random.randint(0, 2)), num_classes=3).float().to(device) for _ in range(batch_size)]
-        states = [torch.cat([image_0s[i], image_1s[i]], dim=0) for i in range(batch_size)]
+        
+        states = [torch.cat([image_0s[i].unsqueeze(0), image_1s[i].unsqueeze(0)], dim=0) for i in range(batch_size)]
         states = torch.stack(states)  # Shape: [Batch, 2, 256, 256]
-        # print(f"states: {states.shape}")
         prev_actions = torch.stack(prev_actions)  # Shape: [Batch, 3]
         total_rewards = [0 for _ in range(batch_size)]
         states = states.to(device)
@@ -166,15 +174,10 @@ def train_dqn(num_episodes=100000, batch_size=100, replay_batch_size=256, gamma=
                 # from utils import save_visualized_images, print_tensor_info
                 # print_tensor_info(states, "Input image")
                 # save_visualized_images(states, save_dir="visualize/Q")
-                q_values = model(states, prev_actions)  # Shape: [Batch, Action_Size]
+                q_values = model(states, prev_actions, mode="Q")  # Shape: [Batch, Action_Size]
                 actions = q_values.argmax(dim=1).tolist()
                 # if DEBUG:
                 #     print(f"[DEBUG] Model actions taken. actions: {actions}")
-            
-            if DEBUG:
-                blur_GT = [abs(focal_lengths[0] - gt_focal_lengths[0]), abs(next_focal_lengths[0] - gt_focal_lengths[0])]
-                blur_pred = model(states, prev_actions, mode="blur")[0]
-                print(f"GT blur: {blur_GT}, Pred blur: {blur_pred}")
 
             new_focal_lengths = [
                 max(0, min(30, next_focal_lengths[i] + (1 if actions[i] == 1 else -1 if actions[i] == 0 else 0)))
@@ -194,7 +197,7 @@ def train_dqn(num_episodes=100000, batch_size=100, replay_batch_size=256, gamma=
             ]
             total_rewards = [total_rewards[i] + rewards[i] for i in range(batch_size)]
 
-            next_states = [torch.cat([image_1s[i], new_images[i]], dim=0) for i in range(batch_size)]
+            next_states = [torch.cat([image_1s[i].unsqueeze(0), new_images[i].unsqueeze(0)], dim=0) for i in range(batch_size)]
             next_states = torch.stack(next_states)  # Shape: [Batch, 2, 256, 256]
             next_prev_actions = [F.one_hot(torch.tensor(actions[i]), num_classes=3).float().to(device) for i in range(batch_size)]
             next_prev_actions = torch.stack(next_prev_actions)  # Shape: [Batch, 3]
@@ -227,8 +230,8 @@ def train_dqn(num_episodes=100000, batch_size=100, replay_batch_size=256, gamma=
 
         print(f"Episode {episode + 1}/{num_episodes} - Average Total Reward: {sum(total_rewards) / batch_size}")
 
-        if DEBUG or VISUALIZE:
-            assert 0, "stop here"
+        # if DEBUG or VISUALIZE:
+        #     assert 0, "stop here"
 
         if episode % 10 == 0:
             target_model.load_state_dict(model.state_dict())

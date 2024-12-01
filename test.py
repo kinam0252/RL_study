@@ -4,11 +4,25 @@ import torch.nn.functional as F
 import random
 import shutil
 from torchvision import transforms
-from model import ResNetDQN, ComplexDQN
-from utils import apply_blur, calculate_reward, BlurDataset
+from model import ResNetDQN, ComplexDQN, BlurDQN
+from utils import apply_blur, calculate_reward, BlurDataset, transform
 from PIL import Image
+import numpy as np
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def process_images_in_list(images):
+    processed_images = []
+    for image in images:
+        image = image.to("cpu")
+        # NumPy로 변환 후 PIL 이미지로 변환
+        image = (image.numpy() * 255).astype(np.uint8).transpose(1, 2, 0)
+        image = Image.fromarray(image)
+        # Transform 적용
+        processed_image = transform(image)
+        processed_image = processed_image.to(device)
+        processed_images.append(processed_image)
+    return processed_images
 
 # 모델 체크포인트 로드
 def load_checkpoint(checkpoint_path, model):
@@ -72,24 +86,29 @@ def run_trial(model, trial_folder, image, gt_focal_length, num_steps, org_image)
     focal_1 = max(0, min(30, focal_0 + random.choice([-1, 0, 1])))
     image_0 = apply_blur(image, focal_0, gt_focal_length).to(device)
     image_1 = apply_blur(image, focal_1, gt_focal_length).to(device)
+    
+    image_0 = process_images_in_list([image_0])[0]
+    image_1 = process_images_in_list([image_1])[0]
+    
     prev_action = F.one_hot(torch.tensor(random.randint(0, 2)), num_classes=3).float().to(device)
-    state = torch.cat([image_0, image_1], dim=0).unsqueeze(0).to(device)
+    state = torch.cat([image_0.unsqueeze(0), image_1.unsqueeze(0)], dim=0).unsqueeze(0).to(device)
     total_reward = 0
 
     for step in range(1, num_steps + 1):
         with torch.no_grad():
-            q_values = model(state, prev_action.unsqueeze(0))
+            q_values = model(state, prev_action.unsqueeze(0), mode="Q")
             action = q_values.argmax().item()
 
         new_focal = max(0, min(30, focal_1 + (1 if action == 1 else -1 if action == 0 else 0))) 
         new_image = apply_blur(image, new_focal, gt_focal_length).to(device)
+        new_image = process_images_in_list([new_image])[0]
         blurred_image = apply_blur(org_image, new_focal, gt_focal_length)
         
         reward = calculate_reward(focal_1, new_focal, gt_focal_length, prev_action.argmax().item(), action)
         print(f"Step {step}: Focal Length: {focal_1} -> {new_focal}, Action: {action} Reward: {reward}")
         total_reward += reward
 
-        next_state = torch.cat([image_1, new_image], dim=0).unsqueeze(0).to(device)
+        next_state = torch.cat([image_1.unsqueeze(0), new_image.unsqueeze(0)], dim=0).unsqueeze(0).to(device)
         next_prev_action = F.one_hot(torch.tensor(action), num_classes=3).float().to(device)
 
         save_image(blurred_image, os.path.join(trial_folder, f"step_{step}.png"))
@@ -102,12 +121,14 @@ def run_trial(model, trial_folder, image, gt_focal_length, num_steps, org_image)
 def test_dqn(checkpoint_path, num_trials=3, num_steps=10, num_samples=100):
     pretrained_checkpoint = "blur_pretrain/checkpoint/blur_predictor_epoch_250.pth"
     
-    model_mode = "complex"
+    model_mode = "blur"
     if model_mode == "complex":
         model = ComplexDQN(input_image_channels=6, action_size=3).to(device)
     elif model_mode == "resnet":
         model = ResNetDQN(input_image_channels=1, action_size=3).to(device)
         # initialize_from_pretrained(model, pretrained_checkpoint, device)
+    elif model_mode == "blur":
+        model = BlurDQN(input_image_channels=3, action_size=3).to(device)
 
     model = load_checkpoint(checkpoint_path, model)
 

@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torchvision import transforms
 from PIL import Image
-from model import ComplexDQN  # 모델 불러오기
+from model import BlurDQN
 
 import torchvision.transforms.functional as F
 from utils import BlurDataset
@@ -22,7 +22,7 @@ def pad_to_square(image):
 dataset_dir = "data/dataset_100"
 initial_batch_size = 64
 min_batch_size = 16
-learning_rate = 1e-4
+learning_rate = 1e-3
 num_epochs = 1000
 save_interval = 10  # 몇 에포크마다 체크포인트 저장할지 설정
 
@@ -41,7 +41,7 @@ def create_dataloader(batch_size):
 
 # 모델 초기화
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = ComplexDQN(input_image_channels=6, action_size=3)  # Grayscale이므로 채널 수 1
+model = BlurDQN(input_image_channels=3, action_size=3)  # Grayscale이므로 채널 수 1
 model.to(device)
 print(f"default device: {device}")
 
@@ -85,11 +85,14 @@ for epoch in range(start_epoch, num_epochs):
     running_loss = 0.0
 
     for images, labels in dataloader:
-        images = images.view(images.size(0), -1, images.size(3), images.size(4))  # (batch_size, C * 2, H, W)
+        images = images.view(images.size(0), 1, -1, images.size(2), images.size(3))  
         images, labels = images.to(device), labels.to(device)
 
         # 예측
         outputs = model(images, mode="blur")
+        outputs = outputs.view(outputs.size(0))
+        if outputs.dtype != labels.dtype:
+            labels = labels.to(outputs.dtype)
 
         # 손실 계산
         loss = criterion(outputs, labels)
