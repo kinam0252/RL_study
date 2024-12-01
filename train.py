@@ -2,7 +2,7 @@ import torch
 import torch.optim as optim
 import torch.nn.functional as F
 import random
-from utils import load_images, apply_blur, calculate_reward, ReplayBuffer, save_checkpoint, compute_loss, BlurDataset
+from utils import load_images, apply_blur, calculate_reward, ReplayBuffer, save_checkpoint, compute_loss, BlurDataset,transform
 from model import ResNetDQN, ComplexDQN
 from datetime import datetime, timezone, timedelta
 import os
@@ -14,9 +14,22 @@ from PIL import Image, ImageDraw, ImageFont
 import matplotlib.pyplot as plt
 
 DEBUG = True
-VISUALIZE = True
+VISUALIZE = False
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def process_images_in_list(images):
+    processed_images = []
+    for image in images:
+        image = image.to("cpu")
+        # NumPy로 변환 후 PIL 이미지로 변환
+        image = (image.numpy() * 255).astype(np.uint8).transpose(1, 2, 0)
+        image = Image.fromarray(image)
+        # Transform 적용
+        processed_image = transform(image)
+        processed_image = processed_image.to(device)
+        processed_images.append(processed_image)
+    return processed_images
 
 def visualize_and_save(org_image_0, org_image_1, blur_amount_0, blur_amount_1, blur_pred_0, blur_pred_1, episode, step):
     # Create samples directory if it doesn't exist
@@ -77,7 +90,7 @@ def save_images_to_folder(images, folder_path="data/custom"):
         save_image(image, image_path)
         print(f"Saved {image_path}")
 
-def train_dqn(num_episodes=100000, batch_size=10, replay_batch_size=256, gamma=0.99, epsilon_start=0.7, 
+def train_dqn(num_episodes=100000, batch_size=100, replay_batch_size=256, gamma=0.99, epsilon_start=0.7, 
               epsilon_end=0.01, epsilon_decay=0.99, checkpoint_interval=50, mode='defocus',):
     dataset_dir = "data/dataset_100"
     dataset = BlurDataset(dataset_dir, mode="Q")
@@ -116,13 +129,9 @@ def train_dqn(num_episodes=100000, batch_size=10, replay_batch_size=256, gamma=0
     # save_images_to_folder(dataset, folder_path=f"{checkpoint_folder}/images")
     
     for episode in range(num_episodes):
-        batch_indices = random.sample(range(len(dataset)), batch_size)
         gt_focal_lengths = [random.randint(5, 25) for _ in range(batch_size)]
-        # images = [dataset[i][0] for i in batch_indices]
-        
-        target_idx = 1
-        # images = [images[target_idx] for _ in range(batch_size)]
-        images = [dataset[target_idx][0] for _ in range(batch_size)]
+        images = [dataset[i][0] for i in range(batch_size)]
+        images = [images[0] for i in range(batch_size)]
         
         if VISUALIZE:
             org_image = dataset[target_idx][1]
@@ -135,10 +144,8 @@ def train_dqn(num_episodes=100000, batch_size=10, replay_batch_size=256, gamma=0
         image_0s = [apply_blur(images[i], focal_lengths[i], gt_focal_lengths[i]).to(device) for i in range(batch_size)]
         image_1s = [apply_blur(images[i], next_focal_lengths[i], gt_focal_lengths[i]).to(device) for i in range(batch_size)]
 
-        # image_0s = [img if img.dim() == 3 else img.unsqueeze(0) for img in image_0s]
-        # image_1s = [img if img.dim() == 3 else img.unsqueeze(0) for img in image_1s]
-
-        # print(f"image_0s: {image_0s[0].shape}, image_1s: {image_1s[0].shape}")
+        image_0s = process_images_in_list(image_0s)
+        image_1s = process_images_in_list(image_1s)
 
         prev_actions = [F.one_hot(torch.tensor(random.randint(0, 2)), num_classes=3).float().to(device) for _ in range(batch_size)]
         states = [torch.cat([image_0s[i], image_1s[i]], dim=0) for i in range(batch_size)]
@@ -163,28 +170,11 @@ def train_dqn(num_episodes=100000, batch_size=10, replay_batch_size=256, gamma=0
                 actions = q_values.argmax(dim=1).tolist()
                 # if DEBUG:
                 #     print(f"[DEBUG] Model actions taken. actions: {actions}")
-
-            if VISUALIZE:
-                org_image = transforms.ToTensor()(org_image)
-                org_image_0 = apply_blur(org_image, focal_lengths[0], gt_focal_lengths[0])
-                org_image_1 = apply_blur(org_image, next_focal_lengths[0], gt_focal_lengths[0])
-                org_image = transforms.ToPILImage()(org_image)
-                
-                org_image_0 = transforms.ToPILImage()(org_image_0)
-                org_image_1 = transforms.ToPILImage()(org_image_1)
-                blur_amount_0 = abs(focal_lengths[0] - gt_focal_lengths[0])
-                blur_amount_1 = abs(next_focal_lengths[0] - gt_focal_lengths[0])
-                
-                # tensor_dir = "tensor"
-                model.eval()
-                from utils import save_visualized_images
-                save_visualized_images(states, save_dir="visualize/Q", step=step)
-                blur_pred = model(states, prev_actions, mode="blur")
-                
-                blur_pred_0 = blur_pred[0][0].item()
-                blur_pred_1 = blur_pred[0][1].item()
-                
-                visualize_and_save(org_image_0, org_image_1, blur_amount_0, blur_amount_1, blur_pred_0, blur_pred_1, episode, step)
+            
+            if DEBUG:
+                blur_GT = [abs(focal_lengths[0] - gt_focal_lengths[0]), abs(next_focal_lengths[0] - gt_focal_lengths[0])]
+                blur_pred = model(states, prev_actions, mode="blur")[0]
+                print(f"GT blur: {blur_GT}, Pred blur: {blur_pred}")
 
             new_focal_lengths = [
                 max(0, min(30, next_focal_lengths[i] + (1 if actions[i] == 1 else -1 if actions[i] == 0 else 0)))
@@ -195,6 +185,7 @@ def train_dqn(num_episodes=100000, batch_size=10, replay_batch_size=256, gamma=0
                 for i in range(batch_size)
             ]
             new_images = [img if img.dim() == 3 else img.unsqueeze(0) for img in new_images]
+            new_images = process_images_in_list(new_images)
 
             rewards = [
                 calculate_reward(next_focal_lengths[i], new_focal_lengths[i], gt_focal_lengths[i],

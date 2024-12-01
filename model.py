@@ -178,6 +178,8 @@ class ComplexDQN(nn.Module):
                       self.shared_fc1, self.shared_fc2, self.blur_fc3]:
             for param in layer.parameters():
                 param.requires_grad = False
+            layer.eval()
+        print(f"Shared layers frozen and Eval mode.")
 
     def forward(self, image_stack, previous_action=None, mode="Q"):
         """

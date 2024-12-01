@@ -16,6 +16,15 @@ DATASET_DIR = 'data/'
 BLUR_DIR = "data/dataset"
 TEST_DIR = "data/dataset/test"
 
+def transform(image):
+    transform = transforms.Compose([
+            transforms.ToTensor(),  # Tensor로 변환
+            transforms.Lambda(pad_to_square),  # 패딩 적용
+            transforms.Resize((256, 256)),
+            transforms.Normalize((0.5,), (0.5,))  # 정규화
+        ])
+    image = transform(image)
+    return image
 
 class BlurDataset(torch.utils.data.Dataset):
     def __init__(self, dataset_dir, mode = "blur"):
@@ -41,7 +50,7 @@ class BlurDataset(torch.utils.data.Dataset):
             image = Image.open(image_path)
             org_image = image.copy()
             image = image.convert("RGB")
-            image = self.transform(image)
+            image = transforms.ToTensor()(image)
             return image, org_image
             
         # 이미지와 레이블 파일 이름
