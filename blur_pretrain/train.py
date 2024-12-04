@@ -8,6 +8,7 @@ from model import BlurDQN
 
 import torchvision.transforms.functional as F
 from utils import BlurDataset
+from torch.utils.data import Dataset, DataLoader
 
 def pad_to_square(image):
     """이미지를 정사각형으로 패딩합니다."""
@@ -19,12 +20,12 @@ def pad_to_square(image):
     return F.pad(image, padding, fill=0)
 
 # 하이퍼파라미터 및 경로 설정
-dataset_dir = "data/dataset_100"
+dataset_dir = "data/total"
 initial_batch_size = 64
 min_batch_size = 16
 learning_rate = 1e-3
-num_epochs = 1000
-save_interval = 10  # 몇 에포크마다 체크포인트 저장할지 설정
+num_epochs = 10000
+save_epoch = 100
 
 # 데이터 전처리
 transform = transforms.Compose([
@@ -34,10 +35,43 @@ transform = transforms.Compose([
     transforms.Normalize((0.5,), (0.5,))  # 정규화
 ])
 
-# 데이터셋 및 데이터 로더 생성 함수
-dataset = BlurDataset(dataset_dir)
-def create_dataloader(batch_size):
-    return torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+# 데이터셋 클래스
+class PreprocessedBlurDataset(Dataset):
+    def __init__(self, preprocessed_data):
+        self.data = preprocessed_data
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        image, label = self.data[idx]
+        return image, label
+
+import zipfile
+import pickle
+
+def load_preprocessed_data(zip_file):
+    with zipfile.ZipFile(zip_file, 'r') as zipf:
+        with zipf.open('processed_data.pkl') as f:
+            data = pickle.load(f)
+    return data
+
+# 데이터 로드 및 데이터셋 생성
+zip_file = "data/dataset_100.zip"
+print(f"Loading preprocessed data from {zip_file}")
+preprocessed_data = load_preprocessed_data(zip_file)
+print(f"Preprocessed data loaded: {len(preprocessed_data)} samples")
+dataset = PreprocessedBlurDataset(preprocessed_data)
+
+# 데이터 로더 생성 함수
+def create_dataloader(dataset, batch_size):
+    return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
+
+# 초기 데이터 로더 설정
+current_batch_size = initial_batch_size
+print(f"Creating data loader with batch size {current_batch_size}")
+dataloader = create_dataloader(dataset, current_batch_size)
+print(f"Data loader created with batch size {current_batch_size}")
 
 # 모델 초기화
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -55,10 +89,26 @@ scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0
 checkpoint_dir = "blur_pretrain/checkpoints/"
 os.makedirs(checkpoint_dir, exist_ok=True)
 
+def initialize_from_pretrained(model, checkpoint_path, device):
+    pretrained_weights = torch.load(checkpoint_path, map_location=device)["model_state_dict"]
+    model_dict = model.state_dict()
+    pretrained_dict = {k: v for k, v in pretrained_weights.items() if k in model_dict}
+    print(f"Pretrained keys: {pretrained_dict.keys()}")
+    model_dict.update(pretrained_dict)
+    model.load_state_dict(model_dict)
+    model.freeze_shared_layers()
+    print(f"Model initialized from pretrained weights at {checkpoint_path}")
+
 # 체크포인트 로드 함수
 def load_checkpoint(checkpoint_path):
     checkpoint = torch.load(checkpoint_path)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    pretrained_weights = checkpoint["model_state_dict"]
+    model_dict = model.state_dict()
+    pretrained_dict = {k: v for k, v in pretrained_weights.items() if k in model_dict}
+    print(f"Pretrained keys: {pretrained_dict.keys()}")
+    model_dict.update(pretrained_dict)
+    model.load_state_dict(model_dict)
+    model.freeze_Q_layers()
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     start_epoch = checkpoint['epoch']
     print(f"Checkpoint loaded: Starting from epoch {start_epoch}")
@@ -73,18 +123,15 @@ best_loss = float('inf')  # 초기값으로 무한대 설정
 if os.path.exists(best_checkpoint_path):
     start_epoch = load_checkpoint(best_checkpoint_path)
 
-# 학습 루프
-current_batch_size = initial_batch_size
-dataloader = create_dataloader(current_batch_size)
-
-warmup = 50
-batch_warmup = 50
+warmup = 99
+batch_warmup = 100
 
 for epoch in range(start_epoch, num_epochs):
     model.train()
     running_loss = 0.0
 
-    for images, labels in dataloader:
+    for i, batch in enumerate(dataloader):
+        images, labels = batch
         images = images.view(images.size(0), 1, -1, images.size(2), images.size(3))  
         images, labels = images.to(device), labels.to(device)
 
@@ -110,7 +157,7 @@ for epoch in range(start_epoch, num_epochs):
     # 배치 크기 조정
     if epoch > warmup and (epoch + 1) % batch_warmup == 0 and current_batch_size > min_batch_size:
         current_batch_size = max(min_batch_size, current_batch_size // 2)
-        dataloader = create_dataloader(current_batch_size)
+        dataloader = create_dataloader(dataset, current_batch_size)
         print(f"Batch size reduced to {current_batch_size}")
         # latest checkpoint 저장
         torch.save({
@@ -125,7 +172,8 @@ for epoch in range(start_epoch, num_epochs):
     scheduler.step(avg_loss)
 
     # best checkpoint 업데이트
-    if epoch > warmup and avg_loss < best_loss:
+    # if epoch > warmup and avg_loss < best_loss:
+    if epoch > warmup and epoch % save_epoch == 0:
         print(f"Saving best checkpoint at {best_checkpoint_path}")
         best_loss = avg_loss
         torch.save({

@@ -180,6 +180,16 @@ class ComplexDQN(nn.Module):
                 param.requires_grad = False
             layer.eval()
         print(f"Shared layers frozen and Eval mode.")
+        
+    def freeze_Q_layers(self):
+        """
+        Freeze the Q-value specific layers by setting requires_grad to False.
+        """
+        for layer in [self.fc_blur1, self.fc_blur2, self.fc_input, self.fc1, self.fc2, self.fc_out]:
+            for param in layer.parameters():
+                param.requires_grad = False
+            layer.eval()
+        print(f"Q-value layers frozen and Eval mode.")
 
     def forward(self, image_stack, previous_action=None, mode="Q"):
         """
@@ -266,6 +276,16 @@ class BlurDQN(nn.Module):
                 param.requires_grad = False
             layer.eval()
         print(f"Shared layers frozen and Eval mode.")
+
+    def freeze_Q_layers(self):
+        """
+        Freeze the Q-value specific layers by setting requires_grad to False.
+        """
+        for layer in [self.fc_in, self.fc_q1, self.fc_q2, self.fc_out]:
+            for param in layer.parameters():
+                param.requires_grad = False
+            layer.eval()
+        print(f"Q-value layers frozen and Eval mode.")
 
     def forward(self, image_stack, prev_actions=None, mode="blur"):
         """
