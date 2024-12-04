@@ -19,12 +19,12 @@ def pad_to_square(image):
     return F.pad(image, padding, fill=0)
 
 # 하이퍼파라미터 및 경로 설정
-dataset_dir = "data/dataset_100"
-initial_batch_size = 64
+dataset_dir = "data/total"
+initial_batch_size = 256
 min_batch_size = 16
 learning_rate = 1e-3
 num_epochs = 1000
-save_interval = 10  # 몇 에포크마다 체크포인트 저장할지 설정
+save_interval = 100  # 몇 에포크마다 체크포인트 저장할지 설정
 
 # 데이터 전처리
 transform = transforms.Compose([
@@ -35,9 +35,11 @@ transform = transforms.Compose([
 ])
 
 # 데이터셋 및 데이터 로더 생성 함수
+print(f"Loading dataset from {dataset_dir}")
 dataset = BlurDataset(dataset_dir)
+print(f"Loaded Dataset size: {len(dataset)}")
 def create_dataloader(batch_size):
-    return torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    return torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=10)
 
 # 모델 초기화
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -75,16 +77,19 @@ if os.path.exists(best_checkpoint_path):
 
 # 학습 루프
 current_batch_size = initial_batch_size
+print(f"Creating DataLoader with batch size {current_batch_size}")
 dataloader = create_dataloader(current_batch_size)
+print(f"Dataloader created with batch size {current_batch_size}")
 
 warmup = 50
-batch_warmup = 50
+batch_warmup = 100
 
 for epoch in range(start_epoch, num_epochs):
     model.train()
     running_loss = 0.0
 
-    for images, labels in dataloader:
+    for i, (images, labels) in enumerate(dataloader):
+        # print(f"Epoch [{epoch + 1}/{num_epochs}], Batch [{i + 1}/{len(dataloader)}")
         images = images.view(images.size(0), 1, -1, images.size(2), images.size(3))  
         images, labels = images.to(device), labels.to(device)
 
@@ -125,7 +130,7 @@ for epoch in range(start_epoch, num_epochs):
     scheduler.step(avg_loss)
 
     # best checkpoint 업데이트
-    if epoch > warmup and avg_loss < best_loss:
+    if epoch > warmup and (epoch + 1) % batch_warmup == 0 and avg_loss < best_loss:
         print(f"Saving best checkpoint at {best_checkpoint_path}")
         best_loss = avg_loss
         torch.save({
